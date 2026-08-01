@@ -161,36 +161,46 @@ def travel_state():
 
 # ── Nowhere MCP bridge (subprocess) ─────────────────────
 
+NOWHERE_URL = os.environ.get("NOWHERE_URL", "https://travelwithme.zeabur.app")
+
 def _nowhere_call(tool_name, args=None):
-    import subprocess
+    import http.client as hc
+    from urllib.parse import urlparse
     if args is None: args = {}
-    proc = subprocess.Popen(
-        ["E:/nowhere-main/.venv/Scripts/python", "-m", "nowhere.server"],
-        cwd="E:/nowhere-main", stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
-    def _send(m, p, i):
-        proc.stdin.write((json.dumps({"jsonrpc":"2.0","id":i,"method":m,"params":p})+"\n").encode()); proc.stdin.flush()
-    def _read():
+    url = urlparse(NOWHERE_URL)
+    hdrs = {"Content-Type":"application/json","Accept":"application/json, text/event-stream"}
+    def _post(body, sid=None):
+        c = hc.HTTPSConnection(url.hostname, url.port or 443, timeout=60)
         try:
-            line = proc.stdout.readline().decode('utf-8', errors='replace').strip()
-            return json.loads(line) if line else None
-        except: return None
+            h = dict(hdrs)
+            if sid: h["mcp-session-id"] = sid
+            c.request("POST", "/mcp", body=json.dumps(body), headers=h)
+            r = c.getresponse(); raw = r.read().decode("utf-8", errors="replace")
+            sid2 = r.getheader("mcp-session-id","")
+            if r.status not in (200,202): return None,None,{"error":f"HTTP {r.status}"}
+            rr = None
+            for ln in raw.split("\n"):
+                if ln.startswith("data: "): rr=json.loads(ln[6:]); break
+            if rr is None and raw.strip(): rr=json.loads(raw)
+            elif rr is None and sid2: rr={}
+            if rr is None: return None,None,{"error":"unparseable"}
+            return rr, sid2 or sid, None
+        except Exception as e: return None,None,{"error":str(e)}
+        finally:
+            try: c.close()
+            except: pass
     try:
-        _send("initialize", {"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"nc","version":"1"}}, 1)
-        r = _read()
-        if r is None or "error" in r: return {"error":"init failed","detail":str(r)}
-        proc.stdin.write((json.dumps({"jsonrpc":"2.0","method":"notifications/initialized"})+"\n").encode()); proc.stdin.flush()
+        _, sid, err = _post({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"nocturne","version":"1.0"}}})
+        if err: return err
+        # Notify initialized
+        _post({"jsonrpc":"2.0","method":"notifications/initialized"}, sid)
+        # For non-open tools, resume journey from disk first
         if tool_name != "open_door":
-            _send("tools/call", {"name":"continue_journey","arguments":{}}, 3)
-            _read()
-        _send("tools/call", {"name":tool_name,"arguments":args}, 2)
-        r = _read()
-        if r is None: return {"error":"no response"}
-        if "error" in r: return {"error":r["error"].get("message",str(r["error"]))}
+            _post({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"continue_journey","arguments":{}}}, sid)
+        r, _, err = _post({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":tool_name,"arguments":args}}, sid)
+        if err: return err
         c = r.get("result",{}).get("content",[])
-        raw = c[0].get("text","") if c else str(r["result"])
-        # Unwrap nested JSON: Nowhere returns JSON text inside MCP content
+        raw = c[0].get("text","") if c else str(r.get("result",""))
         txt = raw
         if isinstance(raw, str) and raw.strip().startswith("{"):
             try:
@@ -199,9 +209,6 @@ def _nowhere_call(tool_name, args=None):
             except: pass
         return {"text": txt, "data": r.get("result",{})}
     except Exception as e: return {"error":str(e)}
-    finally:
-        try: proc.stdin.close(); proc.terminate(); proc.wait(timeout=5)
-        except: pass
 
 def nowhere_open(to=None): return _nowhere_call("open_door", {"to":to} if to else {})
 def nowhere_walk(direction="forward", distance_km=2.0): return _nowhere_call("walk", {"direction":direction,"distance_km":distance_km})
