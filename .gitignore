@@ -1,0 +1,10 @@
+buckets/
+.env
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+desire.db
+weather_residue.json
+dehydration_cache.db
+embeddings.db
