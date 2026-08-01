@@ -48,7 +48,7 @@ import hashlib
 import hmac
 import secrets
 import time
-import json as _json_lib
+import json as _json_lib; json = _json_lib
 import sqlite3
 import re
 import unicodedata
