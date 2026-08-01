@@ -6532,6 +6532,59 @@ async def bridge_health_tool() -> str:
     return json.dumps(bridge_health(), ensure_ascii=False)
 
 
+# ── Travel MCP tools (Nowhere bridge) ─────────────────────
+
+@mcp.tool()
+async def nowhere_open_tool(to: str = None) -> str:
+    """打开门——降落。不传 to 随机降落，传地名去特定地方。"""
+    return json.dumps(nowhere_open(to), ensure_ascii=False)
+
+@mcp.tool()
+async def nowhere_walk_tool(direction: str = "forward", distance_km: float = 2.0) -> str:
+    """走路。direction: N/E/S/W, distance_km: 0.2-5.0。"""
+    return json.dumps(nowhere_walk(direction, distance_km), ensure_ascii=False)
+
+@mcp.tool()
+async def nowhere_look_tool() -> str:
+    """观察周围环境。"""
+    return json.dumps(nowhere_look(), ensure_ascii=False)
+
+@mcp.tool()
+async def nowhere_listen_tool(seconds: int = 10) -> str:
+    """收听当地电台。"""
+    return json.dumps(nowhere_listen(seconds), ensure_ascii=False)
+
+@mcp.tool()
+async def nowhere_meet_tool() -> str:
+    """遇见一个当地人——LLM根据地点当场生成。"""
+    return json.dumps(nowhere_meet(), ensure_ascii=False)
+
+@mcp.tool()
+async def nowhere_postcard_tool(text: str) -> str:
+    """寄一张明信片回家。盖真实坐标/时间/天气邮戳。"""
+    return json.dumps(nowhere_postcard(text), ensure_ascii=False)
+
+@mcp.tool()
+async def nowhere_photo_tool() -> str:
+    """获取当前位置附近的真实照片。"""
+    return json.dumps(nowhere_photo(), ensure_ascii=False)
+
+@mcp.tool()
+async def nowhere_where_tool() -> str:
+    """查看当前位置和旅行状态。"""
+    return json.dumps(nowhere_where(), ensure_ascii=False)
+
+@mcp.tool()
+async def nowhere_leave_note_tool(text: str) -> str:
+    """在路边留一张纸条——下一个经过的人能读到。"""
+    return json.dumps(nowhere_leave_note(text), ensure_ascii=False)
+
+@mcp.tool()
+async def nowhere_read_notes_tool() -> str:
+    """读当前路边的所有纸条。"""
+    return json.dumps(nowhere_read_notes(), ensure_ascii=False)
+
+
 # =============================================================
 # With Me REST API (for Dashboard hardware control panel)
 # =============================================================
