@@ -217,13 +217,29 @@ def nowhere_listen(seconds=10): return _nowhere_call("listen", {"seconds":second
 def nowhere_postcard(text): return _nowhere_call("send_postcard", {"text":text})
 def nowhere_where(): return _nowhere_call("where_am_i", {})
 
+def _get_nowhere_pos():
+    """Get current position from Nowhere server (not local file)."""
+    import re
+    wh = _nowhere_call("where_am_i")
+    if wh.get("error"): return None, None, wh.get("error","unknown")
+    txt = wh.get("text","")
+    place = "这里"
+    m = re.search(r'你在(.+?)[，,\s]', txt)
+    if m: place = m.group(1)
+    lat, lon = 0.0, 0.0
+    try:
+        inner = json.loads(txt) if txt.strip().startswith("{") else {}
+        pos = inner.get("position") or inner.get("pos") or {}
+        if isinstance(pos, dict):
+            lat = pos.get("lat", 0); lon = pos.get("lon", 0)
+    except: pass
+    return lat, lon, place
+
 def nowhere_leave_note(text):
     """Leave a note at current coordinates for the next traveler."""
     import pathlib
-    ts = travel_state()
-    if not ts["journey"] or not ts["journey"]["pos"]:
-        return {"error": "还没开门"}
-    lat, lon = ts["journey"]["pos"]
+    lat, lon, err = _get_nowhere_pos()
+    if err: return {"error": f"还没开门: {err}"}
     key = f"{lat:.2f},{lon:.2f}"
     notes_dir = pathlib.Path(os.environ.get("NOWHERE_HOME") or str(pathlib.Path.home() / ".nowhere")) / "notes"
     notes_dir.mkdir(parents=True, exist_ok=True)
@@ -240,10 +256,8 @@ def nowhere_leave_note(text):
 def nowhere_read_notes():
     """Read all notes left at current location."""
     import pathlib
-    ts = travel_state()
-    if not ts["journey"] or not ts["journey"]["pos"]:
-        return {"error": "还没开门"}
-    lat, lon = ts["journey"]["pos"]
+    lat, lon, err = _get_nowhere_pos()
+    if err: return {"error": f"还没开门: {err}"}
     key = f"{lat:.2f},{lon:.2f}"
     notes_dir = pathlib.Path(os.environ.get("NOWHERE_HOME") or str(pathlib.Path.home() / ".nowhere")) / "notes"
     note_file = notes_dir / f"{key.replace(',','_')}.json"
@@ -260,11 +274,8 @@ def nowhere_read_notes():
 def nowhere_meet():
     """Meet a local person — LLM generates context-aware encounter."""
     import urllib.request, urllib.error
-    ts = travel_state()
-    if not ts["journey"] or not ts["journey"]["pos"]:
-        return {"error": "还没开门"}
-    place = ts["journey"].get("place_name", "这里")
-    lat, lon = ts["journey"]["pos"]
+    lat, lon, place = _get_nowhere_pos()
+    if isinstance(place, dict): return place
     api_key = os.environ.get("OMBRE_API_KEY", "sk-b7b49a6097074b02808ef13f5a4879a6")
     prompt = f"""你在{place}（坐标{lat:.2f},{lon:.2f}）的街头。一个当地人经过。
 用第一人称写一段简短的邂逅（60-100字）：
@@ -291,11 +302,8 @@ def nowhere_meet():
 def nowhere_photo():
     """Get photos from Wikipedia + Commons via VPS proxy."""
     import urllib.request, urllib.error
-    ts = travel_state()
-    if not ts["journey"] or not ts["journey"]["pos"]:
-        return {"error": "还没开门——先选一个地方降落"}
-    place = ts["journey"].get("place_name", "")
-    lat, lon = ts["journey"]["pos"]
+    lat, lon, place = _get_nowhere_pos()
+    if isinstance(place, dict): return place
     PROXY = "http://101.42.54.149:8778/"
     def _get(u):
         return json.loads(urllib.request.urlopen(urllib.request.Request(PROXY + u, headers={"User-Agent":"nc/1"}), timeout=15).read().decode())
