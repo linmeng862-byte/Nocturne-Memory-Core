@@ -4035,16 +4035,8 @@ async def dashboard_page(request):
 
 @mcp.custom_route("/", methods=["GET"])
 async def root_info(request):
-    """Describe the runnable continuity service and bundled interfaces."""
-
-    from starlette.responses import JSONResponse
-    return JSONResponse({
-        "name": "Nocturne Memory Core",
-        "focus": "AI self-continuity",
-        "dashboard": "/dashboard",
-        "health": "/health",
-        "mcp": "/mcp",
-    })
+    from starlette.responses import RedirectResponse
+    return RedirectResponse(url="/dashboard")
 
 
 @mcp.custom_route("/mood", methods=["GET"])
