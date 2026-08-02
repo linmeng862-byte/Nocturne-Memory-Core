@@ -292,14 +292,13 @@ def nowhere_quest_check(action_result):
 _pos_cache = {"lat": 0, "lon": 0, "place": "", "opened": False}
 
 def _get_nowhere_pos():
-    """Get current position from cache (set by nowhere_open/walk). Falls back to Nowhere API."""
-    import re
+    """Get current position from cache or Nowhere server. Auto-opens a door if lost."""
+    import re, pathlib, os as _os
     if _pos_cache["opened"]:
         return _pos_cache["lat"], _pos_cache["lon"], _pos_cache["place"]
-    # Fallback: try Nowhere server
+    # Step 1: try to resume from Nowhere server
     wh = _nowhere_call("where_am_i")
-    if wh.get("error"): return None, None, wh.get("error","unknown")
-    txt = wh.get("text","")
+    txt = wh.get("text", "") if isinstance(wh, dict) else ""
     place = "这里"
     m = re.search(r'你在(.+?)[，,\s]', txt)
     if m: place = m.group(1)
@@ -310,8 +309,30 @@ def _get_nowhere_pos():
         if isinstance(pos, dict):
             lat = pos.get("lat", 0); lon = pos.get("lon", 0)
     except: pass
-    if lat: _pos_cache.update(lat=lat, lon=lon, place=place, opened=True)
-    return lat, lon, place
+    if lat and not wh.get("error"):
+        _pos_cache.update(lat=lat, lon=lon, place=place, opened=True)
+        return lat, lon, place
+    # Step 2: try local disk cache
+    try:
+        save_dir = pathlib.Path(_os.environ.get("NOWHERE_HOME") or str(pathlib.Path.home() / ".nowhere"))
+        jf = save_dir / "journey.json"
+        if jf.exists():
+            jd = json.loads(jf.read_text("utf-8"))
+            pos = jd.get("pos") or {}
+            pn = jd.get("place_name", "") or ""
+            if pos.get("lat"):
+                lat, lon = pos["lat"], pos.get("lon", 0)
+                place = pn or place
+                _pos_cache.update(lat=lat, lon=lon, place=place, opened=True)
+                return lat, lon, place
+    except Exception: pass
+    # Step 3: auto-open a random door
+    r = _nowhere_call("open_door", {})
+    if r.get("error"): return 0, 0, None
+    _update_cache_from_result(r)
+    if _pos_cache["opened"]:
+        return _pos_cache["lat"], _pos_cache["lon"], _pos_cache["place"]
+    return 0, 0, None
 
 def _update_cache_from_result(result):
     """Extract position from a Nowhere result and update cache."""
@@ -369,7 +390,7 @@ def nowhere_meet():
     """Meet a local person — LLM generates context-aware encounter."""
     import urllib.request, urllib.error
     lat, lon, place = _get_nowhere_pos()
-    if not lat and not lon: return {"error": f"还没开门", "text": "先打开一扇门——用 nowhere_open 降落。"}
+    if not place: return {"error": "还没开门", "text": "先打开一扇门——用 nowhere_open 降落。"}
     api_key = os.environ.get("OMBRE_API_KEY", "sk-b7b49a6097074b02808ef13f5a4879a6")
     prompt = f"""你在{place}（坐标{lat:.2f},{lon:.2f}）的街头。一个当地人经过。
 用第一人称写一段简短的邂逅（60-100字）：
@@ -397,10 +418,22 @@ def nowhere_photo():
     """Get photos from Wikipedia + Commons via VPS proxy."""
     import urllib.request, urllib.error
     lat, lon, place = _get_nowhere_pos()
-    if not lat and not lon: return {"error": "还没开门", "text": "先打开一扇门——用 nowhere_open 降落。"}
-    PROXY = "http://101.42.54.149:8778/"
+    if not place: return {"error": "还没开门", "text": "先打开一扇门——用 nowhere_open 降落。"}
+    # Try proxy first, fallback to direct
+    PROXY = os.environ.get("PHOTO_PROXY", "")
     def _get(u):
-        return json.loads(urllib.request.urlopen(urllib.request.Request(PROXY + u, headers={"User-Agent":"nc/1"}), timeout=15).read().decode())
+        """Try direct first, then proxy as fallback."""
+        ua = {"User-Agent": "nocturne/1.0 (memory-core)"}
+        urls = [u]
+        if PROXY:
+            urls.insert(0, PROXY + u)
+        last_err = None
+        for url in urls:
+            try:
+                return json.loads(urllib.request.urlopen(urllib.request.Request(url, headers=ua), timeout=12).read().decode())
+            except Exception as e:
+                last_err = e
+        raise last_err or Exception("all sources failed")
     photos = []
     try:
         # S1: enwiki geosearch via proxy
