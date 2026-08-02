@@ -6604,6 +6604,11 @@ async def nowhere_read_notes_tool() -> str:
     return json.dumps(nowhere_read_notes(), ensure_ascii=False)
 
 @mcp.tool()
+async def nowhere_quests_tool() -> str:
+    """查看当前旅行任务和时限。"""
+    return json.dumps(nowhere_quests(), ensure_ascii=False)
+
+@mcp.tool()
 async def nowhere_achievements_tool() -> str:
     """查看旅行成就徽章。"""
     return json.dumps(nowhere_achievements(), ensure_ascii=False)
@@ -6657,6 +6662,7 @@ async def api_with_me_action(request):
         elif tool == "nowhere_leave_note": result = nowhere_leave_note(**(args if args else {}))
         elif tool == "nowhere_read_notes": result = nowhere_read_notes()
         elif tool == "nowhere_meet": result = nowhere_meet()
+        elif tool == "nowhere_quests": result = nowhere_quests()
         elif tool == "nowhere_achievements": result = nowhere_achievements()
         else: return JSONResponse({"error": f"unknown tool: {tool}"}, status_code=400)
         return JSONResponse({"ok": True, "result": result})
