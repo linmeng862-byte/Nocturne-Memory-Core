@@ -271,11 +271,25 @@ def _nowhere_call(tool_name, args=None):
 def nowhere_open(to=None):
     r = _nowhere_call("open_door", {"to":to} if to else {})
     _update_cache_from_result(r)
+    _save_journey_locally()
     return r
+
+def _save_journey_locally():
+    """Persist current position to local disk so travel state survives restarts."""
+    try:
+        import pathlib, time as _jt
+        if not _pos_cache["opened"]: return
+        d = pathlib.Path(os.environ.get("NOWHERE_HOME") or str(pathlib.Path.home() / ".nowhere"))
+        d.mkdir(parents=True, exist_ok=True)
+        jf = d / "journey.json"
+        data = {"pos": [_pos_cache["lat"], _pos_cache["lon"]], "place_name": _pos_cache["place"], "landed_at": _jt.strftime("%Y-%m-%dT%H:%M:%S"), "elapsed_hours": 0, "mode": "land", "path": []}
+        jf.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception: pass
 
 def nowhere_walk(direction="forward", distance_km=2.0):
     r = _nowhere_call("walk", {"direction":direction,"distance_km":distance_km})
     _update_cache_from_result(r)
+    _save_journey_locally()
     nowhere_quest_check(r, "walk")
     return r
 def nowhere_look():
