@@ -6690,6 +6690,50 @@ async def api_with_me_action(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@mcp.custom_route("/starmap", methods=["GET"])
+async def serve_starmap(request):
+    """记忆星图页面。"""
+    from starlette.responses import HTMLResponse
+    import pathlib
+    p = pathlib.Path(__file__).parent / "starmap.html"
+    if p.exists():
+        return HTMLResponse(p.read_text("utf-8"), media_type="text/html")
+    return HTMLResponse("<h1>Not found</h1>", status_code=404)
+
+@mcp.custom_route("/api/starmap/data", methods=["GET"])
+async def api_starmap_data(request):
+    """Return memory data for star map visualization."""
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+        stars = []
+        for b in all_buckets:
+            btype = b.get("metadata", {}).get("type", "dynamic")
+            name = b.get("metadata", {}).get("name", "")
+            content = b.get("content", "")[:80]
+            importance = b.get("metadata", {}).get("importance", 5)
+            created = b.get("metadata", {}).get("created", "")[:10]
+            label = name or content[:30] or "(untitled)"
+            # Color by type
+            if btype == "feel": c = "#FFD700"
+            elif btype in ("window","writing"): c = "#87CEEB"
+            elif btype == "permanent": c = "#FFB6C1"
+            else: c = "#F5E6CA"
+            stars.append({
+                "id": b.get("id",""),
+                "label": label,
+                "type": btype,
+                "importance": importance,
+                "created": created,
+                "color": c,
+                "preview": content,
+            })
+        return JSONResponse(stars)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 @mcp.custom_route("/static/compass.png", methods=["GET"])
 async def serve_compass(request):
     from starlette.responses import Response
