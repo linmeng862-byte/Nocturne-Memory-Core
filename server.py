@@ -9476,8 +9476,26 @@ async def api_system_status(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+# --- Auto-seed evolution on first run ---
+def _auto_seed_if_empty():
+    import pathlib
+    evo_dir = pathlib.Path(config.get("buckets_dir", "./buckets")) / "evolution"
+    slang_dir = evo_dir / "slang"
+    if not slang_dir.exists() or not list(slang_dir.glob("*.md")):
+        logger.info("Evolution data empty — auto-seeding...")
+        try:
+            import subprocess, sys
+            seed_script = pathlib.Path(__file__).parent / "seed_evolution.py"
+            if seed_script.exists():
+                subprocess.run([sys.executable, str(seed_script)], check=True, timeout=30)
+                logger.info("Auto-seed complete")
+        except Exception as e:
+            logger.warning(f"Auto-seed failed: {e}")
+
+
 # --- Entry point / 启动入口 ---
 if __name__ == "__main__":
+    _auto_seed_if_empty()
     transport = config.get("transport", "stdio")
     logger.info(f"Ombre Brain starting | transport: {transport}")
 
