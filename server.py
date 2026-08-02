@@ -9581,6 +9581,7 @@ def _auto_seed_if_empty():
 # --- Entry point / 启动入口 ---
 if __name__ == "__main__":
     _auto_seed_if_empty()
+    evolution_engine._load_index()  # reload after seed
     transport = config.get("transport", "stdio")
     logger.info(f"Ombre Brain starting | transport: {transport}")
 
