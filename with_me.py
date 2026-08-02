@@ -467,17 +467,30 @@ def _update_cache_from_result(result):
     """Extract position from a Nowhere result and update cache."""
     import re
     txt = result.get("text","") if isinstance(result, dict) else str(result)
+    # Try the MCP structured data first
+    mcp_data = result.get("data", {}) if isinstance(result, dict) else {}
+    sc = mcp_data.get("structuredContent", {}) if isinstance(mcp_data, dict) else {}
+    ndata = sc.get("data", {}) if isinstance(sc, dict) else {}
+    pos = ndata.get("position") or ndata.get("pos") or {}
+    if isinstance(pos, dict) and pos.get("lat"):
+        _pos_cache["lat"] = pos["lat"]
+        _pos_cache["lon"] = pos.get("lon", 0)
+        _pos_cache["opened"] = True
+        m = re.search(r'【(.+?)】', txt)
+        if m: _pos_cache["place"] = m.group(1)
+        return
+    # Fallback: try JSON parsing the text
     try:
         inner = json.loads(txt) if txt.strip().startswith("{") else {}
         data = inner.get("data", inner)
-        pos = data.get("position") or data.get("pos") or {}
-        if isinstance(pos, dict) and pos.get("lat"):
-            _pos_cache["lat"] = pos["lat"]
-            _pos_cache["lon"] = pos.get("lon", 0)
+        pos2 = data.get("position") or data.get("pos") or {}
+        if isinstance(pos2, dict) and pos2.get("lat"):
+            _pos_cache["lat"] = pos2["lat"]
+            _pos_cache["lon"] = pos2.get("lon", 0)
             _pos_cache["opened"] = True
-        m = re.search(r'你在(.+?)[，,\s]', txt)
-        if m: _pos_cache["place"] = m.group(1)
     except: pass
+    m = re.search(r'【(.+?)】', txt)
+    if m: _pos_cache["place"] = m.group(1)
 
 def nowhere_leave_note(text):
     """Leave a note at current coordinates for the next traveler."""
