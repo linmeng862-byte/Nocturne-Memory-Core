@@ -415,8 +415,8 @@ def _update_cache_from_result(result):
 def nowhere_leave_note(text):
     """Leave a note at current coordinates for the next traveler."""
     import pathlib
-    lat, lon, err = _get_nowhere_pos()
-    if err: return {"error": f"还没开门: {err}"}
+    lat, lon, place = _get_nowhere_pos()
+    if not place: return {"error": "还没开门", "text": "先打开一扇门——用 nowhere_open 降落。"}
     key = f"{lat:.2f},{lon:.2f}"
     notes_dir = pathlib.Path(os.environ.get("NOWHERE_HOME") or str(pathlib.Path.home() / ".nowhere")) / "notes"
     notes_dir.mkdir(parents=True, exist_ok=True)
@@ -427,14 +427,13 @@ def nowhere_leave_note(text):
         except: pass
     notes.append({"text": text, "time": __import__("time").strftime("%Y-%m-%d %H:%M"), "pos": [lat, lon]})
     note_file.write_text(json.dumps(notes, ensure_ascii=False, indent=2), encoding="utf-8")
-    place = ts["journey"].get("place_name", "这里")
     return {"text": f"纸条留在{place}的路边了。也许会有人捡到。"}
 
 def nowhere_read_notes():
     """Read all notes left at current location."""
     import pathlib
-    lat, lon, err = _get_nowhere_pos()
-    if err: return {"error": f"还没开门: {err}"}
+    lat, lon, place = _get_nowhere_pos()
+    if not place: return {"error": "还没开门", "text": "先打开一扇门——用 nowhere_open 降落。"}
     key = f"{lat:.2f},{lon:.2f}"
     notes_dir = pathlib.Path(os.environ.get("NOWHERE_HOME") or str(pathlib.Path.home() / ".nowhere")) / "notes"
     note_file = notes_dir / f"{key.replace(',','_')}.json"
@@ -442,7 +441,6 @@ def nowhere_read_notes():
     if note_file.exists():
         try: notes = json.loads(note_file.read_text("utf-8"))
         except: pass
-    place = ts["journey"].get("place_name", "这里")
     if not notes:
         return {"text": f"{place}的路边还没有纸条。你是第一个经过的人。"}
     items = "\n".join(f"「{n['text']}」—— {n['time']}" for n in notes)
