@@ -218,6 +218,7 @@ def nowhere_open(to=None):
 def nowhere_walk(direction="forward", distance_km=2.0):
     r = _nowhere_call("walk", {"direction":direction,"distance_km":distance_km})
     _update_cache_from_result(r)
+    nowhere_quest_check(r)
     return r
 def nowhere_look():
     r = _nowhere_call("look_around", {})
@@ -230,64 +231,125 @@ def nowhere_where(): return _nowhere_call("where_am_i", {})
 
 # ── Quest system ─────────────────────────────────────────
 
-_quests = []  # [{id, title, target, type, time_limit_min, completed, created_at}]
+_quests = []
+_quest_started_at = 0.0
+_quest_place = ""
+QUEST_EXPIRE_MIN = 30
+
+def _quest_achievements_path():
+    import pathlib
+    d = pathlib.Path(os.environ.get("NOWHERE_HOME") or str(pathlib.Path.home() / ".nowhere"))
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "achievements.json"
+
+def _load_achievements():
+    p = _quest_achievements_path()
+    if p.exists():
+        try: return json.loads(p.read_text("utf-8"))
+        except: pass
+    return {"badges": [], "completed_count": 0, "history": []}
+
+def _save_achievements(data):
+    _quest_achievements_path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def nowhere_achievements():
+    """View earned badges."""
+    data = _load_achievements()
+    badges = data.get("badges", [])
+    total = data.get("completed_count", 0)
+    if not badges:
+        return {"text": "还没有获得任何成就。去旅行、完成任务来解锁吧！", "badges": [], "total_completed": total}
+    lines = [f"🏆 {b['name']} — {b.get('place','某地')} ({b.get('date','')})" for b in badges]
+    return {"text": f"已解锁 {len(badges)} 个成就（共完成 {total} 个任务）：\n" + "\n".join(lines), "badges": badges, "total_completed": total}
 
 def nowhere_quests():
-    """Get current quests — auto-generate if none exist."""
-    global _quests
+    """Get quests for current place — cached, auto-expire. Falls back to built-in when no API key."""
+    global _quests, _quest_started_at, _quest_place
+    import time, urllib.request, urllib.error
+    now = time.time()
+    lat, lon, place = _get_nowhere_pos()
+    if not place: return {"text": "还没开门，没有任务。", "quests": []}
+    expired = not _quests or (_quest_started_at and (now - _quest_started_at) > QUEST_EXPIRE_MIN * 60)
+    if not expired and _quest_place and place != _quest_place:
+        expired = True
+    if expired:
+        _quests = []; _quest_started_at = 0; _quest_place = ""
     if not _quests:
-        lat, lon, place = _get_nowhere_pos()
-        if not lat and not lon: return {"text": "还没开门，没有任务。", "quests": []}
         api_key = os.environ.get("DEEPSEEK_API_KEY", os.environ.get("OMBRE_API_KEY", ""))
-        prompt = f"""为{place}（坐标{lat:.2f},{lon:.2f}）生成 2 个简短任务。输出纯 JSON 数组：
+        if not api_key:
+            _quests = [
+                {"id":"q-walk","title":f"在{place}散步","target":"走","type":"walk","time_limit_min":10,"completed":False,"created_at":time.strftime("%H:%M")},
+                {"id":"q-look","title":f"观察{place}的风景","target":"看见","type":"discover","time_limit_min":15,"completed":False,"created_at":time.strftime("%H:%M")},
+                {"id":"q-meet","title":f"遇见{place}的当地人","target":"当地人","type":"meet","time_limit_min":20,"completed":False,"created_at":time.strftime("%H:%M")},
+            ]
+        else:
+            try:
+                prompt = f"""为{place}（坐标{lat:.2f},{lon:.2f}）生成 3 个简短旅行任务。输出纯 JSON 数组：
 [
-  {{"title":"任务描述(10字内)","target":"完成关键词","type":"discover|meet|walk|wait"}},
+  {{"title":"任务描述(10字内)","target":"完成关键词","type":"discover|meet|walk|wait","time_limit_min":15}},
   ...
 ]
 discover=在look_around里发现某物, meet=遇见当地人, walk=走某个方向, wait=等一段时间。
-只输出 JSON 数组，无其他内容。"""
-        import urllib.request, urllib.error
-        try:
-            req = urllib.request.Request("https://api.deepseek.com/v1/chat/completions",
-                data=json.dumps({"model":"deepseek-chat","max_tokens":200,"temperature":0.8,
-                "messages":[{"role":"user","content":prompt}]}).encode(),
-                headers={"Content-Type":"application/json","Authorization":f"Bearer {api_key}"})
-            resp = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
-            raw = resp["choices"][0]["message"]["content"].strip()
-            if raw.startswith("```"): raw = raw.split("\n",1)[-1].rsplit("```",1)[0]
-            tasks = json.loads(raw)
-            import time
-            for t in tasks:
-                t["id"] = f"q-{abs(hash(t['title']))%10000:04d}"
-                t["completed"] = False
-                t["created_at"] = time.strftime("%H:%M")
-            _quests = tasks
-        except Exception as e:
-            return {"text": f"任务生成失败: {e}", "quests": []}
+time_limit_min 是时限（分钟），根据难度设 5-30。只输出 JSON 数组。"""
+                req = urllib.request.Request("https://api.deepseek.com/v1/chat/completions",
+                    data=json.dumps({"model":"deepseek-chat","max_tokens":300,"temperature":0.8,
+                    "messages":[{"role":"user","content":prompt}]}).encode(),
+                    headers={"Content-Type":"application/json","Authorization":f"Bearer {api_key}"})
+                resp = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+                raw = resp["choices"][0]["message"]["content"].strip()
+                if raw.startswith("```"): raw = raw.split("\n",1)[-1].rsplit("```",1)[0]
+                tasks = json.loads(raw)
+                for t in tasks:
+                    t["id"] = f"q-{abs(hash(t['title']))%10000:04d}"
+                    t["completed"] = False
+                    t["created_at"] = time.strftime("%H:%M")
+                    t.setdefault("time_limit_min", 15)
+                _quests = tasks
+            except Exception as e:
+                return {"text": f"任务生成失败: {e}", "quests": []}
+        _quest_started_at = now
+        _quest_place = place
     done = sum(1 for q in _quests if q["completed"])
-    lines = [f"{'✅' if q['completed'] else '⬜'} {q['title']}" for q in _quests]
-    return {"text": f"任务 ({done}/{len(_quests)}):\n" + "\n".join(lines), "quests": _quests}
+    remain = max(0, QUEST_EXPIRE_MIN - int((now - _quest_started_at) / 60)) if _quest_started_at else 0
+    lines = []
+    for q in _quests:
+        s = "✅" if q["completed"] else "⬜"
+        lines.append(f"{s} {q['title']} [{q.get('time_limit_min',15)}min]")
+    return {"text": f"任务 ⏳{remain}分钟 ({done}/{len(_quests)}):\n" + "\n".join(lines), "quests": _quests}
 
 def nowhere_quest_check(action_result):
-    """Auto-check quest completion against action result text."""
+    """Auto-check quest completion and grant achievements."""
     global _quests
     if not _quests: return
     txt = action_result.get("text","") if isinstance(action_result, dict) else str(action_result)
     txt_lower = txt.lower()
+    newly = []
     for q in _quests:
         if q["completed"]: continue
-        target = q.get("target","").lower()
-        if target and target in txt_lower:
-            q["completed"] = True
-    # Also check elapsed time for wait-type quests
+        t = q.get("target","").lower()
+        if t and t in txt_lower:
+            q["completed"] = True; newly.append(q)
     try:
         inner = json.loads(txt) if txt.strip().startswith("{") else {}
-        hours = inner.get("data",{}).get("elapsed_hours", inner.get("elapsed_hours", 0))
+        h = inner.get("data",{}).get("elapsed_hours", inner.get("elapsed_hours", 0))
         for q in _quests:
             if q["completed"]: continue
-            if q["type"] == "wait" and hours * 60 >= q.get("time_limit_min", 15):
-                q["completed"] = True
+            if q["type"] == "wait" and h * 60 >= q.get("time_limit_min", 15):
+                q["completed"] = True; newly.append(q)
     except: pass
+    if newly:
+        lat, lon, place = _get_nowhere_pos()
+        data = _load_achievements()
+        import time as _t
+        for q in newly:
+            bn = q['title']
+            if any(b["name"] == bn for b in data["badges"]): continue
+            data["badges"].append({"name":bn,"place":place,"date":_t.strftime("%Y-%m-%d"),"type":q.get("type","")})
+            data["completed_count"] = data.get("completed_count",0)+1
+            data["history"].append({"title":q["title"],"place":place,"date":_t.strftime("%Y-%m-%d %H:%M")})
+        if all(q["completed"] for q in _quests):
+            data["badges"].append({"name":f"漫游者·{place}","place":place,"date":_t.strftime("%Y-%m-%d"),"type":"milestone"})
+        _save_achievements(data)
 
 _pos_cache = {"lat": 0, "lon": 0, "place": "", "opened": False}
 
@@ -410,7 +472,9 @@ def nowhere_meet():
         )
         resp = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
         text = resp["choices"][0]["message"]["content"].strip()
-        return {"text": text, "place": place}
+        result = {"text": text, "place": place}
+        nowhere_quest_check(result)
+        return result
     except Exception as e:
         return {"error": str(e)}
 
