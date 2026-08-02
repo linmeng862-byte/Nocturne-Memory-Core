@@ -6936,7 +6936,10 @@ async def api_upload_continuity(request):
             bd.mkdir(parents=True, exist_ok=True)
             for member in tar.getmembers():
                 if member.isreg():
-                    dest = bd / pathlib.Path(member.name).name
+                    parts = pathlib.Path(member.name).parts
+                    # Preserve directory structure (traces/, bottles/) inside continuity/
+                    dest = bd / member.name if len(parts) > 1 else bd / parts[-1]
+                    dest.parent.mkdir(parents=True, exist_ok=True)
                     with tar.extractfile(member) as src, open(dest, "wb") as dst:
                         dst.write(src.read())
         # Reload continuity module state
