@@ -6783,7 +6783,7 @@ async def api_seed(request):
                     post = _fm.load(str(f)); t = post.metadata.get("term","")
                     if t: idx[d][t] = str(f.resolve())
         (evo / "_index.json").write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
-        evolution_engine._load_index()
+        evolution_engine._index = evolution_engine._load_index()
         return JSONResponse({"ok": True, "msg": "seed complete", "slang": len(idx["slang"]), "enc": len(idx["encyclopedia"])})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)})
@@ -6810,6 +6810,25 @@ async def api_diag(request):
         "index_exists": idx_file.exists(),
         "index_slang_count": len(json.loads(idx_file.read_text("utf-8")).get("slang",{})) if idx_file.exists() else 0,
     })
+
+
+@mcp.custom_route("/api/fix-feel", methods=["POST"])
+async def api_fix_feel(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        count = 0
+        all_buckets = await bucket_mgr.list_all(include_archive=True)
+        for b in all_buckets:
+            bucket_type = b.get("metadata",{}).get("type","") if isinstance(b.get("metadata"), dict) else b.get("type","")
+            domain = b.get("metadata",{}).get("domain",[]) if isinstance(b.get("metadata"), dict) else b.get("domain",[])
+            if bucket_type == "feel" and (not domain or domain == ["未分类"]):
+                await bucket_mgr.update(b["id"], domain=["feel"])
+                count += 1
+        return JSONResponse({"ok": True, "fixed": count})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)})
 
 
 @mcp.custom_route("/api/upload-continuity", methods=["POST"])
