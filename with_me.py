@@ -684,14 +684,14 @@ def nowhere_photo():
         return {"text":f"找到 {len(photos)} 张照片","photos":photos[:6]}
     except Exception:
         photos = []
-    # S4: Unsplash fallback (no API key, direct image URL from place name)
+    # S4: Picsum fallback (reliable, free)
     if not photos and place:
         try:
-            import urllib.parse
-            encoded = urllib.request.quote(f"{place} landscape city")
-            us_url = f"https://source.unsplash.com/800x600/?{encoded}"
+            import urllib.parse, hashlib
+            seed = abs(int(hashlib.md5(place.encode()).hexdigest()[:8], 16)) % 1000
+            us_url = f"https://picsum.photos/seed/{seed}/800/600"
             photos.append({"url": us_url, "desc": place})
-            return {"text": f"Unsplash 上找到 {place} 的照片", "photos": photos}
+            return {"text": f"找到 {place} 的照片", "photos": photos}
         except Exception: pass
     if not photos: return {"text":"没找到照片——这个地方太偏了。","photos":[]}
     return {"text":f"找到 {len(photos)} 张照片","photos":photos[:6]}

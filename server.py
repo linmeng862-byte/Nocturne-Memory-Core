@@ -6846,6 +6846,30 @@ async def api_us_ring(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@mcp.custom_route("/api/us/notes", methods=["GET"])
+async def api_us_notes(request):
+    """Return all notes from all locations."""
+    from starlette.responses import JSONResponse
+    import pathlib
+    err = _require_auth(request)
+    if err: return err
+    try:
+        notes_dir = pathlib.Path(os.environ.get("NOWHERE_HOME") or str(pathlib.Path.home() / ".nowhere")) / "notes"
+        all_notes = []
+        if notes_dir.exists():
+            for f in notes_dir.glob("*.json"):
+                try:
+                    data = json.loads(f.read_text("utf-8"))
+                    if isinstance(data, list):
+                        for n in data:
+                            n["_file"] = f.stem
+                            all_notes.append(n)
+                except Exception: pass
+        all_notes.sort(key=lambda x: x.get("time",""), reverse=True)
+        return JSONResponse(all_notes[:30])
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 @mcp.custom_route("/api/us/travel", methods=["GET"])
 async def api_us_travel(request):
     """Return Nowhere travel state — current location, postcards, path."""
