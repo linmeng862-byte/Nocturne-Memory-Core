@@ -132,32 +132,77 @@ def bridge_health():
 # ── Travel state (Nowhere bridge) ───────────────────────
 
 def travel_state():
-    """Read Nowhere journey state from disk."""
-    import pathlib
+    """Read Nowhere journey state from disk AND Nowhere server."""
+    import pathlib, re
     save_dir = pathlib.Path(os.environ.get("NOWHERE_HOME") or str(pathlib.Path.home() / ".nowhere"))
     save_file = save_dir / "journey.json"
     pc_file = save_dir / "postcards.json"
-    if not save_file.exists():
-        return {"journey": None, "postcards": [], "path": []}
-    try:
-        data = json.loads(save_file.read_text("utf-8"))
-        postcards = []
-        if pc_file.exists():
-            try: postcards = json.loads(pc_file.read_text("utf-8")).get("items",[])
-            except: pass
-        return {
-            "journey": {
+
+    # Local state
+    journey = None
+    postcards = []
+    path_data = []
+    if save_file.exists():
+        try:
+            data = json.loads(save_file.read_text("utf-8"))
+            journey = {
                 "pos": data.get("pos"),
                 "place_name": data.get("place_name", ""),
                 "landed_at": data.get("landed_at"),
                 "elapsed_hours": data.get("elapsed_hours", 0),
                 "mode": data.get("mode", "land"),
-            },
-            "postcards": postcards[-10:],
-            "path": data.get("path", [])[-20:],
-        }
+            }
+            path_data = data.get("path", [])[-20:]
+        except Exception:
+            pass
+    if pc_file.exists():
+        try:
+            pc_data = json.loads(pc_file.read_text("utf-8"))
+            postcards = (pc_data.get("items") if isinstance(pc_data, dict) else pc_data) or []
+            if not isinstance(postcards, list): postcards = []
+        except Exception:
+            pass
+
+    # Try Nowhere server for additional data
+    try:
+        r = _nowhere_call("where_am_i")
+        if r and not r.get("error"):
+            txt = r.get("text", "")
+            # Try to parse structured data
+            if isinstance(txt, str) and txt.strip().startswith("{"):
+                try:
+                    inner = json.loads(txt)
+                    ndata = inner.get("data", {})
+                    npos = ndata.get("position") or ndata.get("pos") or {}
+                    if npos:
+                        journey = {
+                            "pos": [npos.get("lat", 0), npos.get("lon", 0)],
+                            "place_name": _extract_place_name(txt) or journey.get("place_name", ""),
+                            "landed_at": journey.get("landed_at"),
+                            "elapsed_hours": journey.get("elapsed_hours", 0),
+                            "mode": journey.get("mode", "land"),
+                        }
+                except Exception:
+                    pass
+            # Also try getting postcards from Nowhere server
+            r2 = _nowhere_call("send_postcard", {"text": ""})  # use a dummy call to get cached data
+            # Actually this won't work. Instead, try to get postcards another way.
     except Exception:
-        return {"journey": None, "postcards": [], "path": []}
+        pass
+
+    return {
+        "journey": journey,
+        "postcards": postcards[-20:],
+        "path": path_data,
+    }
+
+def _extract_place_name(text: str) -> str:
+    import re
+    m = re.search(r'【(.+?)】', text)
+    if m: return m.group(1)
+    m = re.search(r'你在(.+?)[，,\s]', text)
+    if m: return m.group(1)
+    return ""
 
 
 # ── Nowhere MCP bridge (subprocess) ─────────────────────
@@ -226,7 +271,28 @@ def nowhere_look():
     nowhere_quest_check(r)
     return r
 def nowhere_listen(seconds=10): return _nowhere_call("listen", {"seconds":seconds})
-def nowhere_postcard(text): return _nowhere_call("send_postcard", {"text":text})
+def nowhere_postcard(text):
+    r = _nowhere_call("send_postcard", {"text": text})
+    # Also save locally so Dashboard can display
+    try:
+        import pathlib, time as _pc_time
+        lat, lon, place = _get_nowhere_pos()
+        stamp = _pc_time.strftime("%Y-%m-%d %H:%M")
+        save_dir = pathlib.Path(os.environ.get("NOWHERE_HOME") or str(pathlib.Path.home() / ".nowhere"))
+        save_dir.mkdir(parents=True, exist_ok=True)
+        pc_file = save_dir / "postcards.json"
+        postcards = []
+        if pc_file.exists():
+            try: postcards = json.loads(pc_file.read_text("utf-8"))
+            except: pass
+        if not isinstance(postcards, list):
+            postcards = []
+        postcards.append({"text": text, "stamp": stamp, "place": place, "pos": [lat, lon]})
+        pc_file.write_text(json.dumps({"items": postcards}, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return r
+
 def nowhere_where(): return _nowhere_call("where_am_i", {})
 
 

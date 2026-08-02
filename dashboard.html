@@ -7752,19 +7752,28 @@ async function loadUsPane(pane) {
       return `<div class="card" style="padding:1.4rem"><h3 style="margin:0 0 .6rem;color:var(--accent);font-family:var(--font-display);font-size:var(--fs-card-title)">提醒者</h3><p style="font-size:var(--fs-body-sm);color:var(--mute);margin:0 0 1rem">Proposal 引擎发现的候选梗词和概念——你来定。</p>${items}<p style="margin:.8rem 0 0;font-size:var(--fs-meta);color:var(--mute)">${d.length} 条待审批</p></div>`;
     },
     travel: d => {
-      if (!d.journey || !d.journey.pos) return '<p class="section-note" style="padding:2rem;text-align:center">还没出发。<br>在 Claude Code 里说"开门去巴黎"——我们就出发了。</p>';
+      if (!d.journey || !d.journey.pos) return '<div style="padding:2rem;text-align:center"><p style="font-size:var(--fs-body);color:var(--mute);margin:0 0 .8rem">还没出发</p><p style="font-size:var(--fs-meta);color:var(--mute)">跟 Claude 说"去巴黎"——我们就出发了。</p></div>';
       const j = d.journey;
       const lat = j.pos[0].toFixed(2); const lon = j.pos[1].toFixed(2);
-      const pcards = (d.postcards||[]).slice(-5).reverse().map(p => `<div style="margin-bottom:.4rem;padding:.6rem .8rem;border:1px solid var(--line-soft);border-radius:8px;background:rgba(250,247,242,.03)"><div style="font-size:var(--fs-body-sm);color:var(--ink)">${esc(p.text||'')}</div><div style="font-size:var(--fs-meta);color:var(--mute);margin-top:.2rem">${esc(p.stamp||'')} · ${esc(p.place||'')}</div></div>`).join('');
+      const allCards = d.postcards || [];
+      const colors = ['#fef9e7','#fdf2f8','#ebf5fb','#eafaf1','#fef3e2','#f5eef8','#fdf2f2','#e8f8f5'];
+      const pcards = allCards.slice().reverse().map((p,i) => {
+        const bg = colors[i % colors.length];
+        const rot = ((i * 1.7) % 3 - 1.5).toFixed(1);
+        return `<div style="padding:.7rem .8rem;border-radius:6px;background:${bg};box-shadow:0 1px 3px rgba(0,0,0,.06);transform:rotate(${rot}deg);font-family:var(--font-ui);max-width:200px">
+          <p style="font-size:var(--fs-body-sm);color:var(--ink);margin:0 0 .3rem;line-height:1.5">${esc(p.text||'')}</p>
+          <div style="display:flex;justify-content:space-between;font-size:var(--fs-meta);color:var(--mute)">
+            <span>📍 ${esc(p.place||'未知')}</span>
+            <span>${esc((p.stamp||'').slice(0,16))}</span>
+          </div>
+        </div>`;
+      }).join('');
       return `<div class="card" style="padding:1.4rem">
-        <h3 style="margin:0 0 .6rem;color:var(--accent);font-family:var(--font-display);font-size:var(--fs-card-title)">旅行</h3>
-        <div style="margin-bottom:1rem;padding:.8rem;border:1px solid var(--accent);border-radius:10px;background:rgba(255,228,225,.04)">
-          <div style="font-size:var(--fs-body-sm);color:var(--mute);margin-bottom:.2rem">当前位置</div>
-          <div style="font-size:var(--fs-body);color:var(--ink);font-weight:500">${esc(j.place_name||'未知')}</div>
-          <div style="font-size:var(--fs-meta);color:var(--mute)">${lat}, ${lon} · ${j.mode==='water'?'水上':'陆地'} · ${(j.elapsed_hours||0).toFixed(1)}h</div>
+        <h3 style="margin:0 0 .6rem;color:var(--accent);font-family:var(--font-display);font-size:var(--fs-card-title)">旅行 · ${esc(j.place_name||'未知')}</h3>
+        <div style="margin-bottom:1.2rem;padding:.6rem .8rem;border-radius:8px;background:rgba(255,228,225,.04);font-size:var(--fs-meta);color:var(--mute);display:flex;gap:1rem">
+          <span>📍 ${lat}, ${lon}</span><span>🕐 ${(j.elapsed_hours||0).toFixed(1)}h</span><span>📮 ${allCards.length} 张明信片</span>
         </div>
-        <p style="font-size:var(--fs-body-sm);color:var(--mute);margin:0 0 .6rem">明信片</p>
-        ${pcards||'<p class="section-note" style="font-size:var(--fs-meta)">还没寄过明信片。"寄一张明信片回家"。</p>'}
+        ${allCards.length ? `<p style="font-size:var(--fs-body-sm);color:var(--mute);margin:0 0 .8rem">明信片墙</p><div style="display:flex;flex-wrap:wrap;gap:.8rem;justify-content:center;padding:.4rem 0">${pcards}</div>` : '<p class="section-note" style="font-size:var(--fs-meta);text-align:center;padding:1.5rem">还没寄过明信片。<br>在旅行中说"寄一张明信片回家"——我会帮你贴上这面墙。</p>'}
       </div>`;
     }
   };
