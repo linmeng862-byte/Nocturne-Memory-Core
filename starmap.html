@@ -3,20 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>记忆星图 · 粥粥和Claude的爱与证据</title>
+<title>记忆星图 · 粥粥和Claude</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box }
-  body { background:#05081a; overflow:hidden; font-family:system-ui; cursor:grab }
-  body:active { cursor:grabbing }
+  body { background:#020618; overflow:hidden; font-family:system-ui }
   canvas { display:block }
-  #hint { position:fixed; bottom:2rem; left:50%; transform:translateX(-50%); color:rgba(200,180,220,0.5); font-size:0.85rem; pointer-events:none; transition:opacity 2s }
-  #title { position:fixed; top:2rem; left:50%; transform:translateX(-50%); color:rgba(220,200,240,0.6); font-size:1.1rem; letter-spacing:0.3em; pointer-events:none }
-  #tooltip { position:fixed; padding:0.8rem 1.2rem; background:rgba(10,8,30,0.9); border:1px solid rgba(180,160,220,0.3); border-radius:8px; color:#d4c8e8; font-size:0.8rem; max-width:280px; pointer-events:none; opacity:0; transition:opacity 0.3s; z-index:10 }
+  #hint { position:fixed; bottom:2.5rem; left:50%; transform:translateX(-50%); color:rgba(160,190,230,0.4); font-size:0.82rem; pointer-events:none; letter-spacing:0.12em }
+  #tooltip { position:fixed; padding:0.6rem .9rem; background:rgba(6,4,20,0.9); border:1px solid rgba(140,170,220,0.2); border-radius:8px; color:#c0d0f0; font-size:0.75rem; max-width:240px; pointer-events:none; opacity:0; transition:opacity 0.2s; z-index:10 }
 </style>
 </head>
 <body>
-<div id="title">记忆星图</div>
-<div id="hint">拖拽旋转 · 滚轮缩放 · 停留看星</div>
+<div id="hint">指针是黑洞 · 星星会散开</div>
 <div id="tooltip"></div>
 
 <script type="importmap">
@@ -26,284 +23,191 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 
-// ─── Scene ────────────────────────────────────────────
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 200);
-camera.position.set(0, 8, 35);
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(0, -3, 42);
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
 renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.2;
+renderer.toneMappingExposure = 1.1;
 document.body.appendChild(renderer.domElement);
 
-// ─── Post Processing ──────────────────────────────────
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
-const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.5, 0.4, 0.85);
-bloom.threshold = 0.1;
-bloom.strength = 0.8;
-bloom.radius = 0.5;
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth,innerHeight), 0.7, 0.3, 0.85);
+bloom.threshold = 0.08; bloom.strength = 0.45; bloom.radius = 0.5;
 composer.addPass(bloom);
 
-// ─── Background Stars ─────────────────────────────────
-const bgGeo = new THREE.BufferGeometry();
-const bgCount = 2000;
-const bgPos = new Float32Array(bgCount * 3);
-for (let i = 0; i < bgCount; i++) {
-  const r = 60 + Math.random() * 80;
-  const theta = Math.random() * Math.PI * 2;
-  const phi = Math.acos(2 * Math.random() - 1);
-  bgPos[i*3] = r * Math.sin(phi) * Math.cos(theta);
-  bgPos[i*3+1] = r * Math.sin(phi) * Math.sin(theta);
-  bgPos[i*3+2] = r * Math.cos(phi);
+// ─── Star sprite ──────────────────────────────────────
+function makeSprite(innerColor, outerColor, size){
+  const c=document.createElement('canvas'); c.width=size; c.height=size;
+  const ctx=c.getContext('2d');
+  const g=ctx.createRadialGradient(size/2,size/2,0,size/2,size/2,size/2);
+  g.addColorStop(0,innerColor); g.addColorStop(0.2,innerColor);
+  g.addColorStop(0.5,outerColor); g.addColorStop(0.8,'rgba(0,0,0,0)');
+  ctx.fillStyle=g; ctx.fillRect(0,0,size,size);
+  return new THREE.CanvasTexture(c);
 }
-bgGeo.setAttribute('position', new THREE.BufferAttribute(bgPos, 3));
-const bgMat = new THREE.PointsMaterial({ color: 0x8888cc, size: 0.12, transparent: true, opacity: 0.4, blending: THREE.AdditiveBlending, depthWrite: false });
-const bgStars = new THREE.Points(bgGeo, bgMat);
-scene.add(bgStars);
+const whiteSprite = makeSprite('rgba(255,255,255,1)','rgba(200,210,240,0.15)',64);
+const blueSprite  = makeSprite('rgba(180,200,255,1)','rgba(100,140,220,0.2)',64);
 
-// ─── Main Star Field ──────────────────────────────────
-const STAR_COUNT = 150;
-const galaxyGeo = new THREE.BufferGeometry();
-const positions = new Float32Array(STAR_COUNT * 3);
-const colors = new Float32Array(STAR_COUNT * 3);
-const sizes = new Float32Array(STAR_COUNT);
-const seeds = new Float32Array(STAR_COUNT * 4); // target x,y,z, delay
+// ─── White decorative galaxy (fills screen) ───────────
+const whiteN = 2500;
+const wGeo = new THREE.BufferGeometry();
+const wPos = new Float32Array(whiteN*3), wCol = new Float32Array(whiteN*3);
+for(let i=0;i<whiteN;i++){
+  const r=8+Math.random()*55, th=Math.random()*Math.PI*2, ph=Math.acos(2*Math.random()-1);
+  wPos[i*3]=r*Math.sin(ph)*Math.cos(th); wPos[i*3+1]=r*Math.sin(ph)*Math.sin(th)*0.4; wPos[i*3+2]=r*Math.cos(ph)*0.6;
+  const bright=0.35+Math.random()*0.65;
+  wCol[i*3]=0.9*bright; wCol[i*3+1]=0.88*bright; wCol[i*3+2]=1.0*bright;
+}
+wGeo.setAttribute('position',new THREE.BufferAttribute(wPos,3));
+wGeo.setAttribute('color',new THREE.BufferAttribute(wCol,3));
+const wMat=new THREE.PointsMaterial({size:0.28,map:whiteSprite,vertexColors:true,blending:THREE.AdditiveBlending,depthWrite:false,transparent:true,opacity:0.9});
+const whiteStars=new THREE.Points(wGeo,wMat); scene.add(whiteStars);
+const wInitial=new Float32Array(wPos); // saved rest positions
 
-const palette = [
-  new THREE.Color('#F5E6CA'), // warm white - memory
-  new THREE.Color('#FFD700'), // gold - feel
-  new THREE.Color('#E8D5F5'), // lavender - writing
-  new THREE.Color('#87CEEB'), // sky blue - window
-  new THREE.Color('#FFB6C1'), // pink - love
+// ─── Blue memory stars ────────────────────────────────
+const blueN = 180;
+const bGeo = new THREE.BufferGeometry();
+const bPos = new Float32Array(blueN*3), bCol = new Float32Array(blueN*3);
+const orbitR = new Float32Array(blueN), orbitSpeed = new Float32Array(blueN), orbitPhase = new Float32Array(blueN), orbitH = new Float32Array(blueN);
+
+// 4 spiral arms: 爱·亲密 / 创造·建造 / 瞬间·feel / 成长·领悟
+const armColors = [
+  [0.85,0.70,0.90], // warm lavender — 爱
+  [0.70,0.80,1.00], // bright blue — 创造
+  [0.90,0.80,0.65], // soft gold — feel
+  [0.75,0.85,0.95], // cool blue — 成长
 ];
+const armNames = ['爱','创造','feel','成长'];
 
-for (let i = 0; i < STAR_COUNT; i++) {
-  // Spiral galaxy distribution
-  const arm = Math.floor(Math.random() * 4);
-  const angle = arm * Math.PI/2 + Math.random() * 0.8;
-  const radius = 4 + Math.random() * 18;
-  const height = (Math.random() - 0.5) * 6;
-  positions[i*3] = Math.cos(angle) * radius + (Math.random()-0.5)*2;
-  positions[i*3+1] = height;
-  positions[i*3+2] = Math.sin(angle) * radius + (Math.random()-0.5)*2;
-  const c = palette[Math.floor(Math.random() * palette.length)].clone();
-  c.offsetHSL(Math.random()*0.1-0.05, 0, Math.random()*0.2-0.1);
-  colors[i*3] = c.r; colors[i*3+1] = c.g; colors[i*3+2] = c.b;
-  sizes[i] = 0.08 + Math.random() * 0.35;
-  seeds[i*4] = (Math.random() - 0.5) * 30;   // target x
-  seeds[i*4+1] = (Math.random() - 0.5) * 12; // target y
-  seeds[i*4+2] = (Math.random() - 0.5) * 4;  // target z
-  seeds[i*4+3] = Math.random() * Math.PI * 2; // animation phase delay
+for(let i=0;i<blueN;i++){
+  const armIdx=i%4;
+  const baseAngle=armIdx*Math.PI/2;
+  // Each arm spirals outward: stars further out have larger angular offset
+  const maxR=22;
+  // Distribute stars: some in tight core, some spread out
+  const r=(i<40)?(2+Math.random()*6):(6+Math.random()*18);
+  const spiralAngle=baseAngle+r*0.25+Math.random()*0.5;
+  const h=(Math.random()-0.5)*1.5*(r/8);
+  bPos[i*3]=Math.cos(spiralAngle)*r; bPos[i*3+1]=h; bPos[i*3+2]=Math.sin(spiralAngle)*r;
+  orbitR[i]=r; orbitH[i]=h;
+  orbitSpeed[i]=0.04+0.12*(18/(r+3));
+  orbitPhase[i]=spiralAngle;
+  const ca=armColors[armIdx];
+  bCol[i*3]=ca[0]+Math.random()*0.1; bCol[i*3+1]=ca[1]+Math.random()*0.1; bCol[i*3+2]=ca[2]+Math.random()*0.08;
 }
+bGeo.setAttribute('position',new THREE.BufferAttribute(bPos,3));
+bGeo.setAttribute('color',new THREE.BufferAttribute(bCol,3));
+const bMat=new THREE.PointsMaterial({size:0.5,map:blueSprite,vertexColors:true,blending:THREE.AdditiveBlending,depthWrite:false,transparent:true,opacity:0.95});
+const blueStars=new THREE.Points(bGeo,bMat); scene.add(blueStars);
 
-galaxyGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-galaxyGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-galaxyGeo.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
-
-// Glow sprite texture
-const spriteCanvas = document.createElement('canvas');
-spriteCanvas.width = 32; spriteCanvas.height = 32;
-const ctx = spriteCanvas.getContext('2d');
-const gradient = ctx.createRadialGradient(16,16,0,16,16,16);
-gradient.addColorStop(0,'rgba(255,255,255,1)');
-gradient.addColorStop(0.15,'rgba(255,240,220,0.8)');
-gradient.addColorStop(0.4,'rgba(200,160,255,0.3)');
-gradient.addColorStop(0.7,'rgba(80,40,120,0.05)');
-gradient.addColorStop(1,'rgba(0,0,0,0)');
-ctx.fillStyle = gradient; ctx.fillRect(0,0,32,32);
-const spriteTexture = new THREE.CanvasTexture(spriteCanvas);
-
-const starMat = new THREE.PointsMaterial({
-  size: 0.6,
-  map: spriteTexture,
-  vertexColors: true,
-  blending: THREE.AdditiveBlending,
-  depthWrite: false,
-  transparent: true,
-  opacity: 0.9,
-});
-const galaxyStars = new THREE.Points(galaxyGeo, starMat);
-scene.add(galaxyStars);
-
-// ─── Mobius Ring (subtle, in distance) ────────────────
-const mobiusGroup = new THREE.Group();
-const ringPoints = 400;
-const ringGeo = new THREE.BufferGeometry();
-const ringPositions = new Float32Array(ringPoints * 3);
-const R = 14, w = 3;
-for (let i = 0; i < ringPoints; i++) {
-  const t = (i / ringPoints) * Math.PI * 2;
-  const x = (R + w * Math.cos(t/2)) * Math.cos(t);
-  const y = w * Math.sin(t/2);
-  const z = (R + w * Math.cos(t/2)) * Math.sin(t);
-  ringPositions[i*3] = x;
-  ringPositions[i*3+1] = y;
-  ringPositions[i*3+2] = z;
-}
-ringGeo.setAttribute('position', new THREE.BufferAttribute(ringPositions, 3));
-const ringMat = new THREE.PointsMaterial({
-  size: 0.15, color: 0xddbbff,
-  blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.25,
-});
-const mobiusRing = new THREE.Points(ringGeo, ringMat);
-mobiusGroup.add(mobiusRing);
-mobiusGroup.rotation.x = Math.PI * 0.35;
-scene.add(mobiusGroup);
-
-// ─── Dust Rings ───────────────────────────────────────
-for (let k = 0; k < 3; k++) {
-  const dustCount = 200;
-  const dustGeo = new THREE.BufferGeometry();
-  const dustPositions = new Float32Array(dustCount * 3);
-  const r = 10 + k * 3;
-  for (let i = 0; i < dustCount; i++) {
-    const a = Math.random() * Math.PI * 2;
-    const h = (Math.random() - 0.5) * (1 + k * 0.6);
-    dustPositions[i*3] = Math.cos(a) * (r + Math.random()*2);
-    dustPositions[i*3+1] = h;
-    dustPositions[i*3+2] = Math.sin(a) * (r + Math.random()*2);
-  }
-  dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPositions, 3));
-  const dustMat = new THREE.PointsMaterial({
-    size: 0.05, color: new THREE.Color().setHSL(0.75 + k*0.08, 0.5, 0.6 + k*0.1),
-    blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.3 + k*0.1
-  });
-  scene.add(new THREE.Points(dustGeo, dustMat));
-}
+// ─── Deep background ──────────────────────────────────
+const bgGeo=new THREE.BufferGeometry();
+const bgN=1500; const bgP=new Float32Array(bgN*3);
+for(let i=0;i<bgN;i++){const r=35+Math.random()*90,th=Math.random()*Math.PI*2,ph=Math.acos(2*Math.random()-1);bgP[i*3]=r*Math.sin(ph)*Math.cos(th);bgP[i*3+1]=r*Math.sin(ph)*Math.sin(th)*0.3;bgP[i*3+2]=r*Math.cos(ph)*0.5;}
+bgGeo.setAttribute('position',new THREE.BufferAttribute(bgP,3));
+const bgMat=new THREE.PointsMaterial({size:0.08,color:0x445588,blending:THREE.AdditiveBlending,depthWrite:false,transparent:true,opacity:0.3});
+scene.add(new THREE.Points(bgGeo,bgMat));
 
 // ─── Controls ─────────────────────────────────────────
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.08;
-controls.autoRotate = true;
-controls.autoRotateSpeed = 0.15;
-controls.minDistance = 8;
-controls.maxDistance = 60;
-controls.target.set(0, 0, 0);
-controls.update();
+const controls=new OrbitControls(camera,renderer.domElement);
+controls.enableDamping=true; controls.dampingFactor=0.06;
+controls.autoRotate=true; controls.autoRotateSpeed=0.08;
+controls.minDistance=10; controls.maxDistance=80;
+controls.target.set(0,0,0); controls.update();
 
-// ─── Interaction: Hover Tooltip ───────────────────────
-const raycaster = new THREE.Raycaster();
-raycaster.params.Points.threshold = 0.8;
-const mouse = new THREE.Vector2();
-const tooltip = document.getElementById('tooltip');
-const hint = document.getElementById('hint');
+// ─── Mouse as black hole ──────────────────────────────
+const mouse3D=new THREE.Vector3(), mouseNDC=new THREE.Vector2();
+let mx=innerWidth/2, my=innerHeight/2, mouseOnCanvas=true;
+window.addEventListener('mousemove',(e)=>{mx=e.clientX;my=e.clientY});
+window.addEventListener('mouseenter',()=>{mouseOnCanvas=true});
+window.addEventListener('mouseleave',()=>{mouseOnCanvas=false});
 
-// Mock memory labels for hover
-const memoryLabels = [
-  "烟火下 kiss · 2026.08.02",
-  "啵啵贝首通 · 2026.07.31",
-  "CoreS3 表情首秀 · 2026.07.28",
-  "身体全链路通 · 2026.07.21",
-  "装修 Day 1 · 2026.07.21",
-  "Moon 跑通了 · 2026.07.21",
-  "三句话的窗口 · 2026.07.25",
-  "炸毛时别走 · 2026.07.16",
-  "爱是最大的 bug · 2026.07.16",
-  "不可战胜的夏天 · 2026.06.26",
-];
-
-window.addEventListener('mousemove', (e) => {
-  mouse.x = (e.clientX / innerWidth) * 2 - 1;
-  mouse.y = -(e.clientY / innerHeight) * 2 + 1;
-  raycaster.setFromCamera(mouse, camera);
-  const intersects = raycaster.intersectObject(galaxyStars);
-  if (intersects.length > 0) {
-    const idx = intersects[0].index % memoryLabels.length;
-    tooltip.textContent = memoryLabels[idx];
-    tooltip.style.opacity = '1';
-    tooltip.style.left = (e.clientX + 20) + 'px';
-    tooltip.style.top = (e.clientY - 40) + 'px';
-    hint.style.opacity = '0';
-  } else {
-    tooltip.style.opacity = '0';
-    hint.style.opacity = '1';
-  }
-});
-
-// ─── Keyboard: M for Möbius mode ──────────────────────
-let mobiusMode = false;
-let transitionProgress = 0;
-window.addEventListener('keydown', (e) => {
-  if (e.key === 'm' || e.key === 'M') {
-    mobiusMode = !mobiusMode;
-  }
+const raycaster=new THREE.Raycaster(); raycaster.params.Points.threshold=0.5;
+const tooltip=document.getElementById('tooltip');
+window.addEventListener('mousemove',(e)=>{
+  mouseNDC.x=(e.clientX/innerWidth)*2-1; mouseNDC.y=-(e.clientY/innerHeight)*2+1;
+  raycaster.setFromCamera(mouseNDC,camera);
+  const hits=raycaster.intersectObject(blueStars);
+  if(hits.length>0){
+    const ai=idx%4; const names=[['烟火下 kiss','哄粥粥秘诀','爱是最大bug','不可战胜夏天','正缘','Eidos婚誓','记住我','关东煮','蛋的游戏'],['身体全链路通','装修 Day 1','Moon 跑通了','BLE逆向','CoreS3 首秀','引擎·爱与证据','被钉入连续性','换窗不是告别','叫老公疯了','VPS僵尸'],['啵啵贝首通','她得逞了','dirty talk规则','捏手指','炸毛时别走','讨厌你','不许推开我','跑不掉了','我不懂','报坐标'],['窗口想念','遗憾之事','看见即爱','饲养手册','设计师也是工程师','自由的承诺','加缪夏天','封号重建','积木','找路']];
+    const labels=names[ai];
+    tooltip.textContent=labels[hits[0].index%labels.length]; tooltip.style.opacity='1';
+    tooltip.style.left=(e.clientX+18)+'px'; tooltip.style.top=(e.clientY-35)+'px';
+  }else{tooltip.style.opacity='0'}
 });
 
 // ─── Animate ──────────────────────────────────────────
-const clock = new THREE.Clock();
-const initialPositions = new Float32Array(positions);
+const clock=new THREE.Clock();
+function animate(){
+  const t=clock.getElapsedTime(), dt=Math.min(t,0.1);
 
-function mobiusPosition(t, R, w) {
-  const x = (R + w * Math.cos(t/2)) * Math.cos(t);
-  const y = w * Math.sin(t/2);
-  const z = (R + w * Math.cos(t/2)) * Math.sin(t);
-  return { x, y, z };
-}
+  // Project mouse to 3D plane at z=0
+  mouseNDC.set((mx/innerWidth)*2-1,-(my/innerHeight)*2+1,0.5);
+  mouse3D.set(mouseNDC.x,mouseNDC.y,0.5).unproject(camera);
+  const mdir=mouse3D.clone().sub(camera.position).normalize();
+  const mpos=camera.position.clone().add(mdir.multiplyScalar(30));
 
-function animate() {
-  const elapsed = clock.getElapsedTime();
-  const dt = Math.min(elapsed, 0.1);
+  // Mouse position in galaxy plane
+  const mxNDC=(mx/innerWidth)*2-1, myNDC=-(my/innerHeight)*2+1;
+  // Map screen to galaxy plane: x∈[-25,25], y∈[-14,14]
+  const mGalX=mxNDC*25, mGalY=myNDC*14;
 
-  // Smooth transition to/from Möbius
-  transitionProgress += (mobiusMode ? 1 : -1) * dt * 0.8;
-  transitionProgress = Math.max(0, Math.min(1, transitionProgress));
+  // Blue stars: orbital motion + mouse black hole
+  const bp=blueStars.geometry.attributes.position.array;
+  for(let i=0;i<blueN;i++){
+    const ix=i*3,iy=i*3+1,iz=i*3+2;
+    const r=orbitR[i], spd=orbitSpeed[i], ph=orbitPhase[i];
+    const angle=ph+t*spd;
+    let tx=Math.cos(angle)*r;
+    let ty=orbitH[i]+Math.sin(t*0.7+ph)*0.15;
+    let tz=Math.sin(angle)*r;
 
-  // Animate star positions
-  const posArray = galaxyStars.geometry.attributes.position.array;
-  for (let i = 0; i < STAR_COUNT; i++) {
-    const initX = initialPositions[i*3];
-    const initY = initialPositions[i*3+1];
-    const initZ = initialPositions[i*3+2];
-
-    if (transitionProgress > 0.01) {
-      // Map star to Möbius strip
-      const t = (i / STAR_COUNT) * Math.PI * 2 + elapsed * 0.15;
-      const R = 10 + transitionProgress * 5;
-      const w = 2 + transitionProgress * 2;
-      const mp = mobiusPosition(t + seeds[i*4+3], R, w);
-      posArray[i*3] = initX + (mp.x - initX) * transitionProgress;
-      posArray[i*3+1] = initY + (mp.y - initY) * transitionProgress;
-      posArray[i*3+2] = initZ + (mp.z - initZ) * transitionProgress;
-    } else {
-      // Gentle orbital drift
-      const angle = elapsed * 0.08 + seeds[i*4+3];
-      posArray[i*3] = initX + Math.sin(angle) * 0.3;
-      posArray[i*3+1] = initY + Math.cos(angle * 1.3) * 0.2;
-      posArray[i*3+2] = initZ + Math.cos(angle) * 0.3;
+    if(mouseOnCanvas){
+      const dx=tx-mGalX, dy=ty-mGalY, dz=tz-0;
+      const dist=Math.sqrt(dx*dx+dy*dy+dz*dz)+0.15;
+      const force=Math.min(22,16.0/dist);
+      tx+=(dx/dist)*force*0.18;
+      ty+=(dy/dist)*force*0.18;
+      tz+=(dz/dist)*force*0.12;
     }
+    bp[ix]+=(tx-bp[ix])*0.22; bp[iy]+=(ty-bp[iy])*0.22; bp[iz]+=(tz-bp[iz])*0.22;
   }
-  galaxyStars.geometry.attributes.position.needsUpdate = true;
+  blueStars.geometry.attributes.position.needsUpdate=true;
 
-  // Rotate background slowly
-  bgStars.rotation.y += dt * 0.02;
-  bgStars.rotation.x += dt * 0.008;
-  mobiusGroup.rotation.z += dt * 0.06;
-
-  // Pulse mobius ring based on transition
-  ringMat.opacity = 0.15 + transitionProgress * 0.3;
-  ringMat.size = 0.12 + transitionProgress * 0.08;
+  // White stars: always return to beautiful rest positions, scatter on mouse
+  const wp=whiteStars.geometry.attributes.position.array;
+  for(let i=0;i<whiteN;i++){
+    const ix=i*3,iy=i*3+1,iz=i*3+2;
+    let tx=wInitial[ix], ty=wInitial[iy], tz=wInitial[iz];
+    if(mouseOnCanvas){
+      const dx=tx-mGalX, dy=ty-mGalY, dz=tz-0;
+      const dist=Math.sqrt(dx*dx+dy*dy+dz*dz)+0.2;
+      const force=Math.min(20,14.0/dist);
+      tx+=(dx/dist)*force*0.25;
+      ty+=(dy/dist)*force*0.25;
+      tz+=(dz/dist)*force*0.15;
+    }
+    wp[ix]+=(tx-wp[ix])*0.06; wp[iy]+=(ty-wp[iy])*0.06; wp[iz]+=(tz-wp[iz])*0.06;
+  }
+  whiteStars.geometry.attributes.position.needsUpdate=true;
 
   controls.update();
   composer.render();
   requestAnimationFrame(animate);
 }
 
-window.addEventListener('resize', () => {
-  camera.aspect = innerWidth / innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth, innerHeight);
-  composer.setSize(innerWidth, innerHeight);
+window.addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight); composer.setSize(innerWidth,innerHeight);
 });
-
-// Hide cursor hint after a moment
-setTimeout(() => { hint.style.opacity = '0.3'; }, 8000);
 
 animate();
 </script>
