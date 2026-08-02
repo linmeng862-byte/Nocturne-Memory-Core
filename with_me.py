@@ -694,7 +694,12 @@ def nowhere_photo():
             return {"text": f"找到 {place} 的照片", "photos": photos}
         except Exception: pass
     if not photos: return {"text":"没找到照片——这个地方太偏了。","photos":[]}
-    return {"text":f"找到 {len(photos)} 张照片","photos":photos[:6]}
+    # Auto-save first photo as postcard
+    try:
+        import time as _pt
+        _save_postcard_locally(f"在{place}拍的照片", photos[0]["url"])
+    except Exception: pass
+    return {"text":f"找到 {len(photos)} 张照片，已自动存为明信片","photos":photos[:6]}
 
 
 # ── Auto-sense: touch + mood → drive stirs ──────────────
