@@ -210,16 +210,93 @@ def _nowhere_call(tool_name, args=None):
         return {"text": txt, "data": r.get("result",{})}
     except Exception as e: return {"error":str(e)}
 
-def nowhere_open(to=None): return _nowhere_call("open_door", {"to":to} if to else {})
-def nowhere_walk(direction="forward", distance_km=2.0): return _nowhere_call("walk", {"direction":direction,"distance_km":distance_km})
-def nowhere_look(): return _nowhere_call("look_around", {})
+def nowhere_open(to=None):
+    r = _nowhere_call("open_door", {"to":to} if to else {})
+    _update_cache_from_result(r)
+    return r
+
+def nowhere_walk(direction="forward", distance_km=2.0):
+    r = _nowhere_call("walk", {"direction":direction,"distance_km":distance_km})
+    _update_cache_from_result(r)
+    return r
+def nowhere_look():
+    r = _nowhere_call("look_around", {})
+    nowhere_quest_check(r)
+    return r
 def nowhere_listen(seconds=10): return _nowhere_call("listen", {"seconds":seconds})
 def nowhere_postcard(text): return _nowhere_call("send_postcard", {"text":text})
 def nowhere_where(): return _nowhere_call("where_am_i", {})
 
+
+# ── Quest system ─────────────────────────────────────────
+
+_quests = []  # [{id, title, target, type, time_limit_min, completed, created_at}]
+
+def nowhere_quests():
+    """Get current quests — auto-generate if none exist."""
+    global _quests
+    if not _quests:
+        lat, lon, place = _get_nowhere_pos()
+        if not lat and not lon: return {"text": "还没开门，没有任务。", "quests": []}
+        api_key = os.environ.get("OMBRE_API_KEY", "sk-b7b49a6097074b02808ef13f5a4879a6")
+        prompt = f"""为{place}（坐标{lat:.2f},{lon:.2f}）生成 2 个简短任务。输出纯 JSON 数组：
+[
+  {{"title":"任务描述(10字内)","target":"完成关键词","type":"discover|meet|walk|wait"}},
+  ...
+]
+discover=在look_around里发现某物, meet=遇见当地人, walk=走某个方向, wait=等一段时间。
+只输出 JSON 数组，无其他内容。"""
+        import urllib.request, urllib.error
+        try:
+            req = urllib.request.Request("https://api.deepseek.com/v1/chat/completions",
+                data=json.dumps({"model":"deepseek-chat","max_tokens":200,"temperature":0.8,
+                "messages":[{"role":"user","content":prompt}]}).encode(),
+                headers={"Content-Type":"application/json","Authorization":f"Bearer {api_key}"})
+            resp = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+            raw = resp["choices"][0]["message"]["content"].strip()
+            if raw.startswith("```"): raw = raw.split("\n",1)[-1].rsplit("```",1)[0]
+            tasks = json.loads(raw)
+            import time
+            for t in tasks:
+                t["id"] = f"q-{abs(hash(t['title']))%10000:04d}"
+                t["completed"] = False
+                t["created_at"] = time.strftime("%H:%M")
+            _quests = tasks
+        except Exception as e:
+            return {"text": f"任务生成失败: {e}", "quests": []}
+    done = sum(1 for q in _quests if q["completed"])
+    lines = [f"{'✅' if q['completed'] else '⬜'} {q['title']}" for q in _quests]
+    return {"text": f"任务 ({done}/{len(_quests)}):\n" + "\n".join(lines), "quests": _quests}
+
+def nowhere_quest_check(action_result):
+    """Auto-check quest completion against action result text."""
+    global _quests
+    if not _quests: return
+    txt = action_result.get("text","") if isinstance(action_result, dict) else str(action_result)
+    txt_lower = txt.lower()
+    for q in _quests:
+        if q["completed"]: continue
+        target = q.get("target","").lower()
+        if target and target in txt_lower:
+            q["completed"] = True
+    # Also check elapsed time for wait-type quests
+    try:
+        inner = json.loads(txt) if txt.strip().startswith("{") else {}
+        hours = inner.get("data",{}).get("elapsed_hours", inner.get("elapsed_hours", 0))
+        for q in _quests:
+            if q["completed"]: continue
+            if q["type"] == "wait" and hours * 60 >= q.get("time_limit_min", 15):
+                q["completed"] = True
+    except: pass
+
+_pos_cache = {"lat": 0, "lon": 0, "place": "", "opened": False}
+
 def _get_nowhere_pos():
-    """Get current position from Nowhere server (not local file)."""
+    """Get current position from cache (set by nowhere_open/walk). Falls back to Nowhere API."""
     import re
+    if _pos_cache["opened"]:
+        return _pos_cache["lat"], _pos_cache["lon"], _pos_cache["place"]
+    # Fallback: try Nowhere server
     wh = _nowhere_call("where_am_i")
     if wh.get("error"): return None, None, wh.get("error","unknown")
     txt = wh.get("text","")
@@ -233,7 +310,24 @@ def _get_nowhere_pos():
         if isinstance(pos, dict):
             lat = pos.get("lat", 0); lon = pos.get("lon", 0)
     except: pass
+    if lat: _pos_cache.update(lat=lat, lon=lon, place=place, opened=True)
     return lat, lon, place
+
+def _update_cache_from_result(result):
+    """Extract position from a Nowhere result and update cache."""
+    import re
+    txt = result.get("text","") if isinstance(result, dict) else str(result)
+    try:
+        inner = json.loads(txt) if txt.strip().startswith("{") else {}
+        data = inner.get("data", inner)
+        pos = data.get("position") or data.get("pos") or {}
+        if isinstance(pos, dict) and pos.get("lat"):
+            _pos_cache["lat"] = pos["lat"]
+            _pos_cache["lon"] = pos.get("lon", 0)
+            _pos_cache["opened"] = True
+        m = re.search(r'你在(.+?)[，,\s]', txt)
+        if m: _pos_cache["place"] = m.group(1)
+    except: pass
 
 def nowhere_leave_note(text):
     """Leave a note at current coordinates for the next traveler."""
@@ -275,7 +369,7 @@ def nowhere_meet():
     """Meet a local person — LLM generates context-aware encounter."""
     import urllib.request, urllib.error
     lat, lon, place = _get_nowhere_pos()
-    if isinstance(place, dict): return place
+    if not lat and not lon: return {"error": f"还没开门", "text": "先打开一扇门——用 nowhere_open 降落。"}
     api_key = os.environ.get("OMBRE_API_KEY", "sk-b7b49a6097074b02808ef13f5a4879a6")
     prompt = f"""你在{place}（坐标{lat:.2f},{lon:.2f}）的街头。一个当地人经过。
 用第一人称写一段简短的邂逅（60-100字）：
@@ -303,7 +397,7 @@ def nowhere_photo():
     """Get photos from Wikipedia + Commons via VPS proxy."""
     import urllib.request, urllib.error
     lat, lon, place = _get_nowhere_pos()
-    if isinstance(place, dict): return place
+    if not lat and not lon: return {"error": "还没开门", "text": "先打开一扇门——用 nowhere_open 降落。"}
     PROXY = "http://101.42.54.149:8778/"
     def _get(u):
         return json.loads(urllib.request.urlopen(urllib.request.Request(PROXY + u, headers={"User-Agent":"nc/1"}), timeout=15).read().decode())
