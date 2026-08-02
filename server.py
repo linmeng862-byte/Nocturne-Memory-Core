@@ -6776,6 +6776,52 @@ async def api_seed(request):
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)})
 
+@mcp.custom_route("/api/diag", methods=["GET"])
+async def api_diag(request):
+    from starlette.responses import JSONResponse
+    import pathlib
+    err = _require_auth(request)
+    if err: return err
+    bd = pathlib.Path(config.get("buckets_dir", "./buckets"))
+    evo = bd / "evolution"
+    slang = evo / "slang"
+    enc = evo / "encyclopedia"
+    idx_file = evo / "_index.json"
+    return JSONResponse({
+        "buckets_dir": str(bd),
+        "buckets_exists": bd.exists(),
+        "evolution_exists": evo.exists(),
+        "slang_exists": slang.exists(),
+        "slang_files": len(list(slang.glob("*.md"))) if slang.exists() else 0,
+        "enc_exists": enc.exists(),
+        "enc_files": len(list(enc.glob("*.md"))) if enc.exists() else 0,
+        "index_exists": idx_file.exists(),
+        "index_slang_count": len(json.loads(idx_file.read_text("utf-8")).get("slang",{})) if idx_file.exists() else 0,
+    })
+
+
+@mcp.custom_route("/api/upload-continuity", methods=["POST"])
+async def api_upload_continuity(request):
+    from starlette.responses import JSONResponse
+    import tarfile, io, pathlib, shutil
+    err = _require_auth(request)
+    if err: return err
+    try:
+        body = await request.body()
+        tgz = io.BytesIO(body)
+        with tarfile.open(fileobj=tgz, mode="r:gz") as tar:
+            bd = pathlib.Path(config.get("buckets_dir", "./buckets")) / "continuity"
+            bd.mkdir(parents=True, exist_ok=True)
+            for member in tar.getmembers():
+                if member.isreg():
+                    dest = bd / pathlib.Path(member.name).name
+                    with tar.extractfile(member) as src, open(dest, "wb") as dst:
+                        dst.write(src.read())
+        # Reload continuity module state
+        return JSONResponse({"ok": True, "msg": "continuity data restored"})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)})
+
 
 @mcp.custom_route("/api/story", methods=["GET"])
 async def api_story(request):
