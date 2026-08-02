@@ -4577,7 +4577,7 @@ function renderBuckets(buckets) {
         html += `<div class="bucket-row" data-bucket-id="${esc(b.id)}" title="ID ${esc(b.id)} · score ${score}" onclick="showDetail('${b.id}')">
           <span class="bucket-index">${String(idx + 1).padStart(2, '0')}</span>
           <span class="bucket-main">
-            <span class="name">${bucketIcon(b)} ${esc(b.name)}</span>
+            <span class="name">${bucketIcon(b)} ${esc(b.name || (b.content_preview || '').slice(0, 30) + '…' || '(untitled)')}</span>
           </span>
           <span class="preview">${esc(b.content_preview || '')}</span>
           <span class="bucket-tail"><span class="time">${timeAgo}</span><span class="score">${score}</span></span>
