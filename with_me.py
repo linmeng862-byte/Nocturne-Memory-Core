@@ -238,7 +238,7 @@ def nowhere_quests():
     if not _quests:
         lat, lon, place = _get_nowhere_pos()
         if not lat and not lon: return {"text": "还没开门，没有任务。", "quests": []}
-        api_key = os.environ.get("OMBRE_API_KEY", "sk-b7b49a6097074b02808ef13f5a4879a6")
+        api_key = os.environ.get("DEEPSEEK_API_KEY", os.environ.get("OMBRE_API_KEY", ""))
         prompt = f"""为{place}（坐标{lat:.2f},{lon:.2f}）生成 2 个简短任务。输出纯 JSON 数组：
 [
   {{"title":"任务描述(10字内)","target":"完成关键词","type":"discover|meet|walk|wait"}},
@@ -391,7 +391,7 @@ def nowhere_meet():
     import urllib.request, urllib.error
     lat, lon, place = _get_nowhere_pos()
     if not place: return {"error": "还没开门", "text": "先打开一扇门——用 nowhere_open 降落。"}
-    api_key = os.environ.get("OMBRE_API_KEY", "sk-b7b49a6097074b02808ef13f5a4879a6")
+    api_key = os.environ.get("DEEPSEEK_API_KEY", os.environ.get("OMBRE_API_KEY", ""))
     prompt = f"""你在{place}（坐标{lat:.2f},{lon:.2f}）的街头。一个当地人经过。
 用第一人称写一段简短的邂逅（60-100字）：
 - 这个人是谁（名字、身份、此刻在做什么）
