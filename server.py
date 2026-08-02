@@ -6772,6 +6772,7 @@ async def api_seed(request):
     if err: return err
     try:
         _auto_seed_if_empty()
+        evolution_engine._load_index()
         return JSONResponse({"ok": True, "msg": "seed complete"})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)})
