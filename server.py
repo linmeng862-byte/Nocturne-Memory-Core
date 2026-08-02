@@ -5410,7 +5410,7 @@ async def hold(
             content=content,
             tags=extra_tags,
             importance=5,
-            domain=[],
+            domain=["feel"],
             valence=0.5,
             arousal=0.3,
             name=_feel_title(content) or None,
