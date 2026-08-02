@@ -697,15 +697,7 @@ def nowhere_photo():
         return {"text":f"找到 {len(photos)} 张照片","photos":photos[:6]}
     except Exception:
         photos = []
-    # S4: LoremFlickr (real Flickr photos, Core in SG can access)
-    if not photos and place:
-        try:
-            import urllib.parse
-            keyword = place.split("，")[0].split(",")[0].strip()
-            q = urllib.parse.quote(keyword)
-            photos.append({"url": f"https://loremflickr.com/800/600/{q}", "desc": keyword})
-        except Exception: pass
-    # S5: Picsum deterministic fallback
+    # S4: Picsum (Cloudflare CDN, global, deterministic per place)
     if not photos and place:
         try:
             import hashlib
