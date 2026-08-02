@@ -6460,7 +6460,20 @@ async def leave_texture(state: str, primary_feeling: str, secondary_feeling: str
 @mcp.tool()
 async def hold_this(memory: str, why: str = "") -> str:
     """主动记住一个瞬间。不会被压缩。必须带why。"""
-    return json.dumps(hold_this_impl(memory, why), ensure_ascii=False, indent=2)
+    result = hold_this_impl(memory, why)
+    # Also create a pinned bucket so breath() and Dashboard see it
+    try:
+        bucket_id = await bucket_mgr.create(
+            content=f"hold_this: {memory}\n\n为什么记: {why}",
+            tags=["hold-this", "瞬间"],
+            importance=10,
+            pinned=True,
+            bucket_type="dynamic",
+        )
+        result["bucketId"] = bucket_id
+    except Exception:
+        pass
+    return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 @mcp.tool()
@@ -7089,6 +7102,34 @@ async def api_continuity_windows(request):
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+
+@mcp.custom_route("/api/continuity/migrate-bottles", methods=["POST"])
+async def api_migrate_bottles(request):
+    """One-time: migrate hold_this bottles to pinned buckets."""
+    from starlette.responses import JSONResponse
+    from continuity_core import _bottles_dir, _load_json
+    err = _require_auth(request)
+    if err: return err
+    try:
+        bd = _bottles_dir()
+        migrated, skipped = 0, 0
+        if bd.exists():
+            all_b = await bucket_mgr.list_all(include_archive=False)
+            seen = set()
+            for b in all_b:
+                ct = (b.get("content") or "")[:100]
+                if ct: seen.add(ct)
+            for f in sorted(bd.glob("hold-*.json")):
+                d = _load_json(f)
+                if not d: continue
+                m = d.get("memory",""); w = d.get("why","")
+                c = f"hold_this: {m}\n\n为什么记: {w}"
+                if c[:100] in seen: skipped += 1; continue
+                bid = await bucket_mgr.create(content=c, tags=["hold-this","瞬间"], importance=10, pinned=True, bucket_type="dynamic")
+                if bid: seen.add(c[:100]); migrated += 1
+        return JSONResponse({"ok": True, "migrated": migrated, "skipped": skipped})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 @mcp.custom_route("/api/continuity/bottles", methods=["GET"])
 async def api_continuity_bottles(request):
