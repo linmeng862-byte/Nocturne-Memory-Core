@@ -703,7 +703,7 @@ def nowhere_photo():
         try:
             import urllib.parse, hashlib
             seed = abs(int(hashlib.md5(place.encode()).hexdigest()[:8], 16)) % 1000
-            us_url = f"https://picsum.photos/seed/{seed}/800/600"
+            us_url = f"https://picsum.photos/800/600?random={seed}"
             photos.append({"url": us_url, "desc": place})
             return {"text": f"找到 {place} 的照片", "photos": photos}
         except Exception: pass
