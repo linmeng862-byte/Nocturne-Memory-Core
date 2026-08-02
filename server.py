@@ -6812,6 +6812,37 @@ async def api_seed(request):
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)})
 
+@mcp.custom_route("/api/evolution/upload", methods=["POST"])
+async def api_evolution_upload(request):
+    """Upload evolution files (persona/ring/cocreate/worldview) as tar.gz."""
+    from starlette.responses import JSONResponse
+    import tarfile, io, pathlib, shutil
+    err = _require_auth(request)
+    if err: return err
+    try:
+        body = await request.body()
+        tgz = io.BytesIO(body)
+        evo_dir = pathlib.Path(config.get("buckets_dir", "./buckets")) / "evolution"
+        with tarfile.open(fileobj=tgz, mode="r:gz") as tar:
+            for member in tar.getmembers():
+                if not member.isreg():
+                    continue
+                parts = pathlib.Path(member.name).parts
+                if len(parts) < 2:
+                    continue
+                subdir = parts[0]
+                if subdir not in ("personas", "rings", "cocreate", "worldview"):
+                    continue
+                dest_dir = evo_dir / subdir
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / parts[-1]
+                with tar.extractfile(member) as src, open(dest, "wb") as dst:
+                    dst.write(src.read())
+        # Rebuild index
+        return JSONResponse({"ok": True, "msg": "uploaded, run /api/seed to rebuild index"})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)})
+
 @mcp.custom_route("/api/diag", methods=["GET"])
 async def api_diag(request):
     from starlette.responses import JSONResponse
