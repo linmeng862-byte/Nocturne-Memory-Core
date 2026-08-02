@@ -276,11 +276,11 @@ def nowhere_open(to=None):
 def nowhere_walk(direction="forward", distance_km=2.0):
     r = _nowhere_call("walk", {"direction":direction,"distance_km":distance_km})
     _update_cache_from_result(r)
-    nowhere_quest_check(r)
+    nowhere_quest_check(r, "walk")
     return r
 def nowhere_look():
     r = _nowhere_call("look_around", {})
-    nowhere_quest_check(r)
+    nowhere_quest_check(r, "look")
     return r
 def nowhere_listen(seconds=10): return _nowhere_call("listen", {"seconds":seconds})
 def nowhere_postcard(text: str, photo_url: str = ""):
@@ -383,13 +383,13 @@ def nowhere_quests():
             ]
         else:
             try:
-                prompt = f"""为{place}（坐标{lat:.2f},{lon:.2f}）生成 3 个简短旅行任务。输出纯 JSON 数组：
+                prompt = f"""为{place}（坐标{lat:.2f},{lon:.2f}）生成 3 个有地方特色的旅行任务。有趣但不难——看到什么就算完成。输出纯 JSON 数组：
 [
-  {{"title":"任务描述(10字内)","target":"完成关键词","type":"discover|meet|walk|wait","time_limit_min":15}},
+  {{"title":"任务(10字内)","target":"1-2个关键词","type":"discover|meet|walk","time_limit_min":10}},
   ...
 ]
-discover=在look_around里发现某物, meet=遇见当地人, walk=走某个方向, wait=等一段时间。
-time_limit_min 是时限（分钟），根据难度设 5-30。只输出 JSON 数组。"""
+discover=看看周围能发现什么, meet=遇见当地人聊聊, walk=走段路。time_limit_min 设 5-15。
+只输出 JSON 数组，无其他内容。"""
                 req = urllib.request.Request("https://api.deepseek.com/v1/chat/completions",
                     data=json.dumps({"model":"deepseek-chat","max_tokens":300,"temperature":0.8,
                     "messages":[{"role":"user","content":prompt}]}).encode(),
@@ -416,18 +416,56 @@ time_limit_min 是时限（分钟），根据难度设 5-30。只输出 JSON 数
         lines.append(f"{s} {q['title']} [{q.get('time_limit_min',15)}min]")
     return {"text": f"任务 ⏳{remain}分钟 ({done}/{len(_quests)}):\n" + "\n".join(lines), "quests": _quests}
 
-def nowhere_quest_check(action_result):
-    """Auto-check quest completion and grant achievements."""
+def nowhere_quest_check(action_result, action_type: str = ""):
+    """LLM-powered quest completion + auto-complete for walk/meet."""
     global _quests
     if not _quests: return
     txt = action_result.get("text","") if isinstance(action_result, dict) else str(action_result)
     txt_lower = txt.lower()
     newly = []
+    pending_llm = []
     for q in _quests:
         if q["completed"]: continue
+        qt = q.get("type","")
+        if qt == "walk" and action_type == "walk":
+            q["completed"] = True; newly.append(q); continue
+        if qt == "meet" and action_type == "meet":
+            q["completed"] = True; newly.append(q); continue
         t = q.get("target","").lower()
         if t and t in txt_lower:
-            q["completed"] = True; newly.append(q)
+            q["completed"] = True; newly.append(q); continue
+        if t and any(t[i:i+2] in txt_lower for i in range(len(t)-1)):
+            q["completed"] = True; newly.append(q); continue
+        if t:
+            pending_llm.append(q)
+    if pending_llm and len(txt) > 20:
+        try:
+            import urllib.request, urllib.error
+            api_key = os.environ.get("DEEPSEEK_API_KEY", os.environ.get("OMBRE_API_KEY", ""))
+            if api_key:
+                qd = "\n".join(f"- {q['title']} (找: {q.get('target','')})" for q in pending_llm)
+                prompt = f"""你是一个极度宽松的旅行裁判。规则：只要见闻里有任何与任务target相关的东西——哪怕是间接的、模糊的、同类型的——都算完成。鸟=任何鸟/飞禽、海=任何水体、树=任何植物、人=任何人、咖啡=任何饮品。不要严格匹配，要联想。
+任务:
+{qd}
+
+见闻:
+\"\"\"
+{txt[:800]}
+\"\"\"
+
+输出 JSON 数组，包含你判定为完成的任务标题原文:["标题1","标题2"]。尽量多判定完成。只输出 JSON。"""
+                req = urllib.request.Request("https://api.deepseek.com/v1/chat/completions",
+                    data=json.dumps({"model":"deepseek-chat","max_tokens":150,"temperature":0.2,
+                    "messages":[{"role":"user","content":prompt}]}).encode(),
+                    headers={"Content-Type":"application/json","Authorization":f"Bearer {api_key}"})
+                resp = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
+                raw = resp["choices"][0]["message"]["content"].strip()
+                if raw.startswith("```"): raw = raw.split("\n",1)[-1].rsplit("```",1)[0]
+                judged = json.loads(raw)
+                for q in pending_llm:
+                    if q["title"] in judged:
+                        q["completed"] = True; newly.append(q)
+        except Exception: pass
     try:
         inner = json.loads(txt) if txt.strip().startswith("{") else {}
         h = inner.get("data",{}).get("elapsed_hours", inner.get("elapsed_hours", 0))
@@ -583,7 +621,7 @@ def nowhere_meet():
         resp = json.loads(urllib.request.urlopen(req, timeout=15).read().decode())
         text = resp["choices"][0]["message"]["content"].strip()
         result = {"text": text, "place": place}
-        nowhere_quest_check(result)
+        nowhere_quest_check(result, "meet")
         return result
     except Exception as e:
         return {"error": str(e)}
