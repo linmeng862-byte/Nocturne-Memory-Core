@@ -6771,9 +6771,20 @@ async def api_seed(request):
     err = _require_auth(request)
     if err: return err
     try:
-        _auto_seed_if_empty()
+        import pathlib, hashlib, time, frontmatter as _fm
+        now = time.strftime("%Y-%m-%dT%H:%M:%S")
+        bd = pathlib.Path(config.get("buckets_dir", "./buckets"))
+        evo = bd / "evolution"
+        idx = {"personas":{},"slang":{},"encyclopedia":{},"rings":[],"wander":[],"cocreate":{},"worldview":{}}
+        for d in ["slang","encyclopedia"]:
+            sd = evo / d
+            if sd.exists():
+                for f in sd.glob("*.md"):
+                    post = _fm.load(str(f)); t = post.metadata.get("term","")
+                    if t: idx[d][t] = str(f.resolve())
+        (evo / "_index.json").write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
         evolution_engine._load_index()
-        return JSONResponse({"ok": True, "msg": "seed complete"})
+        return JSONResponse({"ok": True, "msg": "seed complete", "slang": len(idx["slang"]), "enc": len(idx["encyclopedia"])})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)})
 
