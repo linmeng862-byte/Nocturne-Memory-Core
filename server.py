@@ -128,6 +128,7 @@ from with_me import (
     nowhere_quests,
     nowhere_quest_check,
     nowhere_achievements,
+    nowhere_collect_souvenir,
     sense_you,
 )
 
@@ -6579,9 +6580,9 @@ async def nowhere_meet_tool() -> str:
     return json.dumps(nowhere_meet(), ensure_ascii=False)
 
 @mcp.tool()
-async def nowhere_postcard_tool(text: str) -> str:
-    """寄一张明信片回家。盖真实坐标/时间/天气邮戳。"""
-    return json.dumps(nowhere_postcard(text), ensure_ascii=False)
+async def nowhere_postcard_tool(text: str, photo_url: str = "") -> str:
+    """寄一张明信片回家。盖真实坐标/时间/天气邮戳。可附带照片。"""
+    return json.dumps(nowhere_postcard(text, photo_url), ensure_ascii=False)
 
 @mcp.tool()
 async def nowhere_photo_tool() -> str:
@@ -6612,6 +6613,11 @@ async def nowhere_quests_tool() -> str:
 async def nowhere_achievements_tool() -> str:
     """查看旅行成就徽章。"""
     return json.dumps(nowhere_achievements(), ensure_ascii=False)
+
+@mcp.tool()
+async def nowhere_collect_souvenir_tool(name: str = "", icon: str = "🎁") -> str:
+    """在当前地点收藏一个纪念品。name: 名字, icon: 图标emoji。"""
+    return json.dumps(nowhere_collect_souvenir(name, icon), ensure_ascii=False)
 
 
 # =============================================================
@@ -6664,6 +6670,7 @@ async def api_with_me_action(request):
         elif tool == "nowhere_meet": result = nowhere_meet()
         elif tool == "nowhere_quests": result = nowhere_quests()
         elif tool == "nowhere_achievements": result = nowhere_achievements()
+        elif tool == "nowhere_collect_souvenir": result = nowhere_collect_souvenir(**(args if args else {}))
         else: return JSONResponse({"error": f"unknown tool: {tool}"}, status_code=400)
         return JSONResponse({"ok": True, "result": result})
     except Exception as e:

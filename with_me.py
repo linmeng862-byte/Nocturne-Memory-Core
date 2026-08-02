@@ -193,8 +193,20 @@ def travel_state():
     return {
         "journey": journey,
         "postcards": postcards[-20:],
+        "souvenirs": _load_souvenirs(),
         "path": path_data,
     }
+
+def _load_souvenirs():
+    """Load souvenirs from local disk."""
+    import pathlib
+    d = pathlib.Path(os.environ.get("NOWHERE_HOME") or str(pathlib.Path.home() / ".nowhere"))
+    sf = d / "souvenirs.json"
+    if sf.exists():
+        try: data = json.loads(sf.read_text("utf-8"))
+        except: return []
+        return (data.get("items") if isinstance(data, dict) else data) or []
+    return []
 
 def _extract_place_name(text: str) -> str:
     import re
@@ -271,27 +283,47 @@ def nowhere_look():
     nowhere_quest_check(r)
     return r
 def nowhere_listen(seconds=10): return _nowhere_call("listen", {"seconds":seconds})
-def nowhere_postcard(text):
+def nowhere_postcard(text: str, photo_url: str = ""):
+    """Send a postcard. photo_url makes it a photo postcard."""
     r = _nowhere_call("send_postcard", {"text": text})
-    # Also save locally so Dashboard can display
-    try:
-        import pathlib, time as _pc_time
-        lat, lon, place = _get_nowhere_pos()
-        stamp = _pc_time.strftime("%Y-%m-%d %H:%M")
-        save_dir = pathlib.Path(os.environ.get("NOWHERE_HOME") or str(pathlib.Path.home() / ".nowhere"))
-        save_dir.mkdir(parents=True, exist_ok=True)
-        pc_file = save_dir / "postcards.json"
-        postcards = []
-        if pc_file.exists():
-            try: postcards = json.loads(pc_file.read_text("utf-8"))
-            except: pass
-        if not isinstance(postcards, list):
-            postcards = []
-        postcards.append({"text": text, "stamp": stamp, "place": place, "pos": [lat, lon]})
-        pc_file.write_text(json.dumps({"items": postcards}, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+    _save_postcard_locally(text, photo_url)
     return r
+
+def _save_postcard_locally(text: str, photo_url: str = ""):
+    try:
+        import pathlib, time as _pt
+        lat, lon, place = _get_nowhere_pos()
+        d = pathlib.Path(os.environ.get("NOWHERE_HOME") or str(pathlib.Path.home() / ".nowhere"))
+        d.mkdir(parents=True, exist_ok=True)
+        pf = d / "postcards.json"
+        cards = []
+        if pf.exists():
+            try: cards = json.loads(pf.read_text("utf-8"))
+            except: pass
+        if not isinstance(cards, list): cards = []
+        entry = {"text": text, "stamp": _pt.strftime("%Y-%m-%d %H:%M"), "place": place, "pos": [lat, lon]}
+        if photo_url and str(photo_url).strip():
+            entry["photo_url"] = str(photo_url).strip()
+        cards.append(entry)
+        pf.write_text(json.dumps({"items": cards}, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception: pass
+
+def nowhere_collect_souvenir(name: str = "", icon: str = "🎁"):
+    """Collect a souvenir at current location."""
+    import pathlib, time as _st
+    lat, lon, place = _get_nowhere_pos()
+    if not place: return {"error": "还没开门"}
+    d = pathlib.Path(os.environ.get("NOWHERE_HOME") or str(pathlib.Path.home() / ".nowhere"))
+    d.mkdir(parents=True, exist_ok=True)
+    sf = d / "souvenirs.json"
+    items = []
+    if sf.exists():
+        try: items = json.loads(sf.read_text("utf-8"))
+        except: pass
+    if not isinstance(items, list): items = []
+    items.append({"name": name or f"{place}的纪念品","icon": icon,"place": place,"pos": [lat, lon],"date": _st.strftime("%Y-%m-%d %H:%M")})
+    sf.write_text(json.dumps({"items": items}, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"text": f"收藏了「{name or place}」{icon}", "souvenirs": items}
 
 def nowhere_where(): return _nowhere_call("where_am_i", {})
 
