@@ -6782,9 +6782,33 @@ async def api_seed(request):
                 for f in sd.glob("*.md"):
                     post = _fm.load(str(f)); t = post.metadata.get("term","")
                     if t: idx[d][t] = str(f.resolve())
+        # Scan personas (name → path)
+        ps_dir = evo / "personas"
+        if ps_dir.exists():
+            for f in ps_dir.glob("*.md"):
+                post = _fm.load(str(f)); n = post.metadata.get("name","")
+                if n: idx["personas"][n] = str(f.resolve())
+        # Scan rings (list of paths, sorted by created date)
+        ri_dir = evo / "rings"
+        if ri_dir.exists():
+            ring_files = list(ri_dir.glob("*.md"))
+            ring_files.sort(key=lambda f: str(_fm.load(str(f)).metadata.get("created","")))
+            idx["rings"] = [str(f.resolve()) for f in ring_files]
+        # Scan cocreate (title → path)
+        co_dir = evo / "cocreate"
+        if co_dir.exists():
+            for f in co_dir.glob("*.md"):
+                post = _fm.load(str(f)); t = post.metadata.get("title","")
+                if t: idx["cocreate"][t] = str(f.resolve())
+        # Scan worldview (name → path)
+        wv_dir = evo / "worldview"
+        if wv_dir.exists():
+            for f in wv_dir.glob("*.md"):
+                post = _fm.load(str(f)); n = post.metadata.get("name","")
+                if n: idx["worldview"][n] = str(f.resolve())
         (evo / "_index.json").write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
         evolution_engine._index = evolution_engine._load_index()
-        return JSONResponse({"ok": True, "msg": "seed complete", "slang": len(idx["slang"]), "enc": len(idx["encyclopedia"])})
+        return JSONResponse({"ok": True, "msg": "seed complete", "slang": len(idx["slang"]), "enc": len(idx["encyclopedia"]), "personas": len(idx["personas"]), "rings": len(idx["rings"]), "cocreate": len(idx["cocreate"]), "worldview": len(idx["worldview"])})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)})
 
