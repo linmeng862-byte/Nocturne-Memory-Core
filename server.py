@@ -6765,6 +6765,18 @@ async def api_us_travel(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@mcp.custom_route("/api/seed", methods=["POST"])
+async def api_seed(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        _auto_seed_if_empty()
+        return JSONResponse({"ok": True, "msg": "seed complete"})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)})
+
+
 @mcp.custom_route("/api/story", methods=["GET"])
 async def api_story(request):
     """Return our story as first-person narrative paragraphs (book pages)."""
