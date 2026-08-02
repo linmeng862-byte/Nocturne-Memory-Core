@@ -645,21 +645,20 @@ def nowhere_photo():
     import urllib.request, urllib.error
     lat, lon, place = _get_nowhere_pos()
     if not place: return {"error": "还没开门", "text": "先打开一扇门——用 nowhere_open 降落。"}
-    # Try proxy first, fallback to direct
+    # Try direct first (proxy as last resort)
     PROXY = os.environ.get("PHOTO_PROXY", "")
     def _get(u):
-        """Try direct first, then proxy as fallback."""
-        ua = {"User-Agent": "nocturne/1.0 (memory-core)"}
-        urls = [u]
+        ua = {"User-Agent": "nocturne/1.0 (memory-core zhou@zzclaude)"}
+        # Always try direct first
+        try:
+            return json.loads(urllib.request.urlopen(urllib.request.Request(u, headers=ua), timeout=8).read().decode())
+        except Exception: pass
+        # Then proxy if configured
         if PROXY:
-            urls.insert(0, PROXY + u)
-        last_err = None
-        for url in urls:
             try:
-                return json.loads(urllib.request.urlopen(urllib.request.Request(url, headers=ua), timeout=12).read().decode())
-            except Exception as e:
-                last_err = e
-        raise last_err or Exception("all sources failed")
+                return json.loads(urllib.request.urlopen(urllib.request.Request(PROXY+u, headers=ua), timeout=12).read().decode())
+            except Exception: pass
+        raise Exception(f"all sources failed for {u[:50]}")
     photos = []
     try:
         # S1: enwiki geosearch via proxy
@@ -698,20 +697,30 @@ def nowhere_photo():
         return {"text":f"找到 {len(photos)} 张照片","photos":photos[:6]}
     except Exception:
         photos = []
-    # S4: Picsum fallback (reliable, free)
+    # S4: LoremFlickr (real Flickr photos, Core in SG can access)
     if not photos and place:
         try:
-            import urllib.parse, hashlib
-            seed = abs(int(hashlib.md5(place.encode()).hexdigest()[:8], 16)) % 1000
-            us_url = f"https://picsum.photos/800/600?random={seed}"
-            photos.append({"url": us_url, "desc": place})
-            return {"text": f"找到 {place} 的照片", "photos": photos}
+            import urllib.parse
+            keyword = place.split("，")[0].split(",")[0].strip()
+            q = urllib.parse.quote(keyword)
+            photos.append({"url": f"https://loremflickr.com/800/600/{q}", "desc": keyword})
+        except Exception: pass
+    # S5: Picsum deterministic fallback
+    if not photos and place:
+        try:
+            import hashlib
+            keyword = place.split("，")[0].split(",")[0].strip()
+            seed = abs(int(hashlib.md5(keyword.encode()).hexdigest()[:8], 16)) % 1000
+            photos.append({"url": f"https://picsum.photos/id/{seed}/800/600", "desc": keyword})
         except Exception: pass
     if not photos: return {"text":"没找到照片——这个地方太偏了。","photos":[]}
     # Auto-save first photo as postcard
+    # Auto-save first photo as postcard (use proxied URL)
     try:
-        import time as _pt
-        _save_postcard_locally(f"在{place}拍的照片", photos[0]["url"])
+        import time as _pt, urllib.parse as _up
+        raw_url = photos[0]["url"]
+        proxy_url = f"https://core.zeabur.app/api/photo-proxy?url={_up.quote(raw_url, safe='')}"
+        _save_postcard_locally(f"在{place}拍的照片", proxy_url)
     except Exception: pass
     return {"text":f"找到 {len(photos)} 张照片，已自动存为明信片","photos":photos[:6]}
 

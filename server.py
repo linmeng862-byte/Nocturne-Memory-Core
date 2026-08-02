@@ -6690,6 +6690,32 @@ async def api_with_me_action(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@mcp.custom_route("/api/photo-proxy", methods=["GET"])
+async def api_photo_proxy(request):
+    """Proxy: Core downloads image and serves it, so user's browser only sees core.zeabur.app."""
+    from starlette.responses import Response
+    import urllib.request, hashlib, pathlib, time as _pt
+    url = request.query_params.get("url", "")
+    if not url: return Response(b"", status_code=400)
+    # Cache on disk
+    cache_dir = pathlib.Path(config.get("buckets_dir", "./buckets")) / "photo_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    key = hashlib.md5(url.encode()).hexdigest()[:16]
+    cache_file = cache_dir / key
+    # Serve from cache if fresh (< 24h)
+    if cache_file.exists():
+        age = _pt.time() - cache_file.stat().st_mtime
+        if age < 86400:
+            return Response(cache_file.read_bytes(), media_type="image/jpeg")
+    # Download
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "nocturne/1.0"})
+        data = urllib.request.urlopen(req, timeout=15).read()
+        cache_file.write_bytes(data)
+        return Response(data, media_type="image/jpeg")
+    except Exception:
+        return Response(b"", status_code=502)
+
 @mcp.custom_route("/starmap", methods=["GET"])
 async def serve_starmap(request):
     """记忆星图页面。"""
