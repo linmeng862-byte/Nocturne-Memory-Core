@@ -7999,6 +7999,31 @@ async function loadContinuity() {
       html += '</div>';
     }
 
+    // --- Bottles (hold_this memories) ---
+    try {
+      const br = await fetch('/api/continuity/bottles');
+      if (br.ok) {
+        const bottles = await br.json();
+        if (bottles.length) {
+          html += `<div style="display:flex;align-items:center;gap:.6rem;margin:1.5rem 0 .8rem;cursor:pointer" onclick="document.getElementById('bottles-list').classList.toggle('history-hidden');this.querySelector('.fold-arrow').classList.toggle('rotated')">
+            <span class="fold-arrow" style="font-size:var(--fs-body);color:var(--mute);transition:transform .3s">▾</span>
+            <span style="font-size:var(--fs-card-title);color:var(--mute);font-family:var(--font-display)">漂流瓶 · ${bottles.length}</span>
+          </div>
+          <div id="bottles-list">`;
+          bottles.forEach(b => {
+            const d = (b.timestamp || '').slice(0,16);
+            html += `<div style="border:1px solid var(--line-soft);border-radius:10px;padding:.8rem 1rem;margin-bottom:.5rem;background:rgba(250,247,242,.02)">
+              <div style="font-size:var(--fs-body-sm);color:var(--ink);margin-bottom:.3rem;line-height:1.5">${esc(b.memory||'')}</div>
+              <div style="display:flex;justify-content:space-between;font-size:var(--fs-meta);color:var(--mute)">
+                <span>💭 ${esc(b.why||'')}</span><span>${d}</span>
+              </div>
+            </div>`;
+          });
+          html += '</div>';
+        }
+      }
+    } catch(e) { console.error('bottles:', e); }
+
     shell.innerHTML = html;
   } catch(e) { console.error('continuity:', e); }
 }

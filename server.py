@@ -7090,6 +7090,25 @@ async def api_continuity_windows(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@mcp.custom_route("/api/continuity/bottles", methods=["GET"])
+async def api_continuity_bottles(request):
+    """Return all hold_this bottles."""
+    from starlette.responses import JSONResponse
+    from continuity_core import _bottles_dir, _load_json
+    err = _require_auth(request)
+    if err: return err
+    try:
+        bottles_dir = _bottles_dir()
+        bottles = []
+        if bottles_dir.exists():
+            for f in sorted(bottles_dir.glob("hold-*.json"), reverse=True):
+                d = _load_json(f)
+                if d:
+                    bottles.append({"id": d.get("id",""), "timestamp": d.get("timestamp",""), "memory": d.get("memory",""), "why": d.get("why","")})
+        return JSONResponse(bottles)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 @mcp.custom_route("/api/continuity", methods=["GET"])
 async def api_continuity(request):
     """Continuity data — window count, last texture, concern, unresolved."""
