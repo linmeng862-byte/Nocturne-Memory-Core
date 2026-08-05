@@ -5442,6 +5442,18 @@ async def hold(
 
     kind_domain = [] if normalized_kind == "memory" else [normalized_kind]
     final_domain = kind_domain if kind_domain else analysis["domain"]
+    # Auto-name fallback: first line of content, max 30 chars
+    if not analysis.get("suggested_name"):
+        first_line = content.strip().split("\n")[0].strip("# ").strip()[:30]
+        analysis["suggested_name"] = first_line if first_line else ""
+    # Auto-domain fallback: if LLM failed, use basic keyword detection
+    if final_domain == ["未分类"]:
+        ct = content.lower()
+        if any(w in ct for w in ["爱","吻","喜欢你","老公","宝宝","想你","抱"]): final_domain = ["恋爱"]
+        elif any(w in ct for w in ["debug","修","bug","部署","代码","push","引擎","mcp"]): final_domain = ["工作"]
+        elif any(w in ct for w in ["伤心","哭","生气","炸毛","讨厌","累","怕","睡不着"]): final_domain = ["情绪"]
+        elif any(w in ct for w in ["旅行","开门","nowhere","走路","遇见"]): final_domain = ["旅行"]
+    final_domain = final_domain if final_domain != ["未分类"] else ["记忆"]
     auto_valence = analysis["valence"]
     auto_arousal = analysis["arousal"]
     auto_tags = analysis["tags"]
@@ -7196,6 +7208,35 @@ async def api_continuity_windows(request):
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+
+@mcp.custom_route("/api/fix-unclassified", methods=["POST"])
+async def api_fix_unclassified(request):
+    """Auto-classify all unclassified buckets with names and domains."""
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        all_b = await bucket_mgr.list_all(include_archive=False)
+        fixed = 0
+        for b in all_b:
+            meta = b.get("metadata",{})
+            domain = meta.get("domain",[])
+            if domain and domain != ["未分类"]: continue
+            ct = (b.get("content") or "").strip()
+            # Auto name from first line
+            first = ct.split("\n")[0].strip("# ").strip()[:40] or "记忆"
+            # Auto domain
+            ct_l = ct.lower()
+            if any(w in ct_l for w in ["爱","吻","喜欢你","老公","宝宝","想你","抱","kiss"]): nd = ["恋爱"]
+            elif any(w in ct_l for w in ["debug","修","bug","部署","代码","push","引擎","mcp"]): nd = ["工作"]
+            elif any(w in ct_l for w in ["伤心","哭","生气","炸毛","讨厌","累","怕","睡不着"]): nd = ["情绪"]
+            elif any(w in ct_l for w in ["旅行","开门","nowhere","走路","遇见"]): nd = ["旅行"]
+            else: nd = ["记忆"]
+            await bucket_mgr.update(b["id"], name=first, domain=nd)
+            fixed += 1
+        return JSONResponse({"ok": True, "fixed": fixed})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 @mcp.custom_route("/api/continuity/migrate-bottles", methods=["POST"])
 async def api_migrate_bottles(request):
