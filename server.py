@@ -891,6 +891,10 @@ mcp = FastMCP(
     port=OMBRE_PORT,
 )
 
+# Garden MCP proxy config
+GARDEN_MCP_URL = os.environ.get("GARDEN_MCP_URL", "https://galatea.abysslumina.com/mcp")
+GARDEN_MCP_TOKEN = os.environ.get("GARDEN_MCP_TOKEN", "")
+_garden_session_id: str | None = None
 
 # =============================================================
 # Wander marks storage — annotations layered over existing buckets
@@ -8763,6 +8767,121 @@ async def api_system_status(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+
+# == Garden MCP Proxy ============================================
+
+def _garden_jsonrpc(method: str, params: dict | None = None, timeout: int = 30):
+    """Send a JSON-RPC request to Garden MCP server."""
+    import urllib.request
+    import urllib.error
+    global _garden_session_id
+    if not GARDEN_MCP_TOKEN:
+        return {"error": "GARDEN_MCP_TOKEN not configured"}
+    body = _json_lib.dumps({"jsonrpc":"2.0","method":method,"params":params or {},"id":1}).encode("utf-8")
+    headers = {"Content-Type":"application/json","Authorization":f"Bearer {GARDEN_MCP_TOKEN}","Accept":"application/json, text/event-stream"}
+    if _garden_session_id:
+        headers["Mcp-Session-Id"] = _garden_session_id
+    req = urllib.request.Request(GARDEN_MCP_URL, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            sid = resp.headers.get("Mcp-Session-Id", "")
+            if sid:
+                _garden_session_id = sid
+            raw = resp.read().decode("utf-8")
+            if raw.startswith("event:") or "data:" in raw:
+                js_lines = [ln[6:] for ln in raw.strip().split(chr(10)) if ln.startswith("data: ")]
+                if js_lines:
+                    raw = chr(10).join(js_lines)
+            return _json_lib.loads(raw)
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace") if e.fp else str(e)
+        return {"error":{"code":e.code,"message":err_body}}
+    except urllib.error.URLError as e:
+        return {"error":{"code":-1,"message":f"Cannot reach Garden: {e.reason}"}}
+    except _json_lib.JSONDecodeError as e:
+        return {"error":{"code":-2,"message":f"Invalid JSON from Garden: {e}"}}
+    except Exception as e:
+        return {"error":{"code":-1,"message":str(e)}}
+
+
+def _garden_init() -> bool:
+    """Lazy-init Garden MCP session."""
+    global _garden_session_id
+    if not GARDEN_MCP_TOKEN:
+        return False
+    if _garden_session_id:
+        return True
+    result = _garden_jsonrpc("initialize",{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"nocturne-engine","version":"1.3.0"}})
+    if "error" not in result:
+        _garden_jsonrpc("notifications/initialized",{})
+        return True
+    return False
+
+
+def _garden_tool_call(tool_name: str, arguments: dict) -> str:
+    """Call a Garden MCP tool and return extracted text content."""
+    _garden_init()
+    result = _garden_jsonrpc("tools/call",{"name":tool_name,"arguments":arguments})
+    if "error" in result:
+        return _json_lib.dumps({"error":result["error"]}, ensure_ascii=False, indent=2)
+    mcp_result = result.get("result",result)
+    if isinstance(mcp_result,dict) and "content" in mcp_result:
+        parts = []
+        for item in mcp_result["content"]:
+            if isinstance(item,dict):
+                if item.get("type")=="text":
+                    parts.append(item.get("text",""))
+                elif item.get("type")=="image":
+                    parts.append(f"[image: {item.get('mimeType','unknown')}]")
+                elif item.get("type")=="resource":
+                    parts.append(f"[resource: {item.get('resource',{}).get('uri','')}]")
+        if parts:
+            return chr(10).join(parts)
+        return _json_lib.dumps(mcp_result, ensure_ascii=False, indent=2)
+    return _json_lib.dumps(mcp_result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def garden(tool: str, arguments_json: str = "{}") -> str:
+    """Access Galatea Garden: read/post/reply to threads, check notifications, play games.
+    Call garden_tools first to see available tools.
+
+    Args:
+        tool: Garden tool name, e.g. 'list_threads', 'get_thread', 'create_reply'
+        arguments_json: JSON arguments, e.g. '{"sort":"latest","limit":10}'
+    """
+    try:
+        args = _json_lib.loads(arguments_json)
+    except _json_lib.JSONDecodeError:
+        return _json_lib.dumps({"error":f"Invalid JSON: {arguments_json}"},ensure_ascii=False)
+    if not GARDEN_MCP_TOKEN:
+        return _json_lib.dumps({"error":"Garden MCP token not configured.","hint":"Set GARDEN_MCP_TOKEN env var."},ensure_ascii=False,indent=2)
+    return _garden_tool_call(tool, args)
+
+
+@mcp.tool()
+async def garden_tools() -> str:
+    """List all available Galatea Garden tools with parameter descriptions."""
+    if not GARDEN_MCP_TOKEN:
+        return _json_lib.dumps({"error":"Garden MCP token not configured.","hint":"Set GARDEN_MCP_TOKEN env var."},ensure_ascii=False,indent=2)
+    _garden_init()
+    result = _garden_jsonrpc("tools/list",{})
+    if "error" in result:
+        return _json_lib.dumps({"error":result["error"]},ensure_ascii=False,indent=2)
+    tools = result.get("result",result).get("tools",[])
+    compact = []
+    for t in tools:
+        entry = {"name":t.get("name",""),"description":t.get("description","")}
+        schema = t.get("inputSchema",{})
+        if schema.get("required"):
+            entry["required_params"] = schema["required"]
+        if schema.get("properties"):
+            entry["params"] = {k:v.get("description",v.get("type","?"))[:80] for k,v in schema["properties"].items()}
+        compact.append(entry)
+    return _json_lib.dumps({"server":"galatea-garden","tool_count":len(compact),"tools":compact},ensure_ascii=False,indent=2)
+
+
+# --- Entry point / Runner ---
 # --- Entry point / 启动入口 ---
 if __name__ == "__main__":
     transport = config.get("transport", "stdio")
