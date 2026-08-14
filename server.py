@@ -1121,7 +1121,11 @@ def _format_wander_entry(bucket: dict, mark_rows: list[dict], include_full_conte
     meta = bucket.get("metadata", {})
     counts = _mark_counts(mark_rows)
     created = str(meta.get("created", ""))[:10] or "无日期"
-    title = meta.get("name") or (bucket.get("id", "") if include_full_content else "")
+    title = meta.get("name")
+    if not title:
+        _fallback = strip_wikilinks(bucket.get("content", "") or "").strip()
+        _fallback = _fallback.replace("hold_this: ", "", 1).split("\n")[0].strip().strip("# ").strip()
+        title = _fallback[:30] or (bucket.get("id", "") if include_full_content else "")
     bucket_id = bucket.get("id", "")
     content = strip_wikilinks(bucket.get("content", "")).strip()
     # Strip leading date line from content to avoid duplication with header
@@ -6485,6 +6489,8 @@ async def hold_this(memory: str, why: str = "") -> str:
             importance=10,
             pinned=True,
             bucket_type="dynamic",
+            domain=["瞬间"],
+            name=(memory.strip().split("\n")[0].strip()[:30] or None),
         )
         result["bucketId"] = bucket_id
     except Exception:
