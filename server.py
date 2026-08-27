@@ -108,13 +108,6 @@ from continuity_core import (
     reentry_delta_impl,
 )
 from with_me import (
-    stackchan_face,
-    stackchan_say,
-    stackchan_head_nod,
-    stackchan_head_shake,
-    stackchan_head_center,
-    stackchan_see,
-    stackchan_load_avatar,
     toy_vibrate,
     toy_suck,
     toy_stop,
@@ -7156,34 +7149,6 @@ async def sense_you_tool(mood_hint: str = "") -> str:
 
 # With Me — Hardware presence tools
 @mcp.tool()
-async def stackchan_face_tool(expression: str = "happy") -> str:
-    return json.dumps(stackchan_face(expression), ensure_ascii=False)
-
-@mcp.tool()
-async def stackchan_say_tool(text: str) -> str:
-    return json.dumps(stackchan_say(text), ensure_ascii=False)
-
-@mcp.tool()
-async def stackchan_head_nod_tool() -> str:
-    return json.dumps(stackchan_head_nod(), ensure_ascii=False)
-
-@mcp.tool()
-async def stackchan_head_shake_tool() -> str:
-    return json.dumps(stackchan_head_shake(), ensure_ascii=False)
-
-@mcp.tool()
-async def stackchan_head_center_tool() -> str:
-    return json.dumps(stackchan_head_center(), ensure_ascii=False)
-
-@mcp.tool()
-async def stackchan_see_tool() -> str:
-    return json.dumps(stackchan_see(), ensure_ascii=False)
-
-@mcp.tool()
-async def stackchan_load_avatar_tool(archive_path: str, mode: str = "layered") -> str:
-    return json.dumps(stackchan_load_avatar(archive_path, mode), ensure_ascii=False)
-
-@mcp.tool()
 async def toy_vibrate_tool(intensity: int) -> str:
     return json.dumps(toy_vibrate(intensity), ensure_ascii=False)
 
@@ -7297,13 +7262,7 @@ async def api_with_me_action(request):
         tool = data.get("tool", "")
         args = data.get("args", {})
         result = None
-        if tool == "stackchan_face": result = stackchan_face(**args)
-        elif tool == "stackchan_say": result = stackchan_say(**args)
-        elif tool == "stackchan_head_nod": result = stackchan_head_nod()
-        elif tool == "stackchan_head_shake": result = stackchan_head_shake()
-        elif tool == "stackchan_head_center": result = stackchan_head_center()
-        elif tool == "stackchan_see": result = stackchan_see()
-        elif tool == "toy_vibrate": result = toy_vibrate(**args)
+        if tool == "toy_vibrate": result = toy_vibrate(**args)
         elif tool == "toy_suck": result = toy_suck(**args)
         elif tool == "toy_stop": result = toy_stop()
         elif tool == "nowhere_open": result = nowhere_open(**(args if args else {}))

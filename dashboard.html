@@ -2826,14 +2826,10 @@ html[data-theme="sakura-milk"] ::selection { background: rgba(216,132,159,.28); 
 <div class="content" id="with-me-view" style="display:none">
   <div style="padding:2rem;max-width:var(--content-max);margin:0 auto">
     <h2 style="color:var(--accent);font-family:var(--font-display);font-size:var(--fs-section);margin-bottom:.2rem">with me</h2>
-    <p class="section-note" style="margin:0 0 2rem">身体 · StackChan · 啵啵贝 · 旅行</p>
+    <p class="section-note" style="margin:0 0 2rem">啵啵贝 · 旅行</p>
 
-    <!-- Status strip: Moon + Toy -->
+    <!-- Status strip: Toy -->
     <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:1.5rem">
-      <div style="flex:1;min-width:200px;padding:1rem 1.2rem;border:1px solid var(--line-soft);border-radius:12px">
-        <div style="font-size:var(--fs-meta);color:var(--mute);margin-bottom:.3rem">Moon 身体</div>
-        <div id="wm-body" style="font-size:var(--fs-body-sm);color:var(--ink-soft);max-height:80px;overflow-y:auto;line-height:1.5">—</div>
-      </div>
       <div style="flex:1;min-width:200px;padding:1rem 1.2rem;border:1px solid var(--line-soft);border-radius:12px">
         <div style="font-size:var(--fs-meta);color:var(--mute);margin-bottom:.3rem">啵啵贝</div>
         <div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
@@ -2846,35 +2842,6 @@ html[data-theme="sakura-milk"] ::selection { background: rgba(216,132,159,.28); 
           <button onclick="wmAction('toy_stop')" style="padding:.2rem .6rem;border:1px solid rgba(255,100,100,.3);border-radius:6px;background:transparent;color:#f99;cursor:pointer;font-size:var(--fs-meta)">停</button>
           <span id="wm-toy-status" style="font-size:var(--fs-micro);color:var(--mute)"></span>
         </div>
-      </div>
-    </div>
-
-    <!-- StackChan card -->
-    <div class="card" style="padding:1.4rem;margin-bottom:1.5rem">
-      <h3 style="margin:0 0 1rem;color:var(--ink);font-size:var(--fs-card-title)">StackChan · CoreS3</h3>
-      <div style="margin-bottom:.8rem">
-        <span style="font-size:var(--fs-meta);color:var(--mute);display:block;margin-bottom:.4rem">表情</span>
-        <div style="display:flex;gap:.4rem;flex-wrap:wrap">
-          <button onclick="wmAction('stackchan_face',{expression:'happy'})" class="wm-btn">😊 开心</button>
-          <button onclick="wmAction('stackchan_face',{expression:'thinking'})" class="wm-btn">🤔 思考</button>
-          <button onclick="wmAction('stackchan_face',{expression:'sad'})" class="wm-btn">😢 难过</button>
-          <button onclick="wmAction('stackchan_face',{expression:'surprised'})" class="wm-btn">😮 惊讶</button>
-          <button onclick="wmAction('stackchan_face',{expression:'idle'})" class="wm-btn">😐 待机</button>
-          <button onclick="wmAction('stackchan_face',{expression:'off'})" class="wm-btn" style="border-color:rgba(255,100,100,.3);color:#f99">🌙 关屏</button>
-        </div>
-      </div>
-      <div style="margin-bottom:.8rem">
-        <span style="font-size:var(--fs-meta);color:var(--mute);display:block;margin-bottom:.4rem">头部</span>
-        <div style="display:flex;gap:.4rem">
-          <button onclick="wmAction('stackchan_head_nod')" class="wm-btn">⬆ 点头</button>
-          <button onclick="wmAction('stackchan_head_shake')" class="wm-btn">↔ 摇头</button>
-          <button onclick="wmAction('stackchan_head_center')" class="wm-btn">⊙ 回正</button>
-          <button onclick="wmAction('stackchan_see')" class="wm-btn" style="border-color:var(--accent);color:var(--accent)">📷 拍照</button>
-        </div>
-      </div>
-      <div style="display:flex;gap:.5rem">
-        <input id="wm-say-text" placeholder="说点什么..." style="flex:1;padding:.4rem .8rem;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--ink);font-size:var(--fs-body-sm)">
-        <button onclick="wmAction('stackchan_say',{text:document.getElementById('wm-say-text').value})" class="wm-btn" style="border-color:var(--accent);color:var(--accent);padding:.4rem 1.2rem">说话</button>
       </div>
     </div>
 
@@ -7875,18 +7842,6 @@ async function wmRefresh() {
     const r = await fetch('/api/with-me/status', {credentials:'include'});
     if (!r.ok) return;
     const d = await r.json();
-    var bd = d.body;
-    if (bd && bd.title) {
-      var dots = [];
-      if (bd.touched) dots.push('触摸中');
-      if (bd.detail) dots.push(bd.detail);
-      if (bd.time) dots.push(bd.time);
-      document.getElementById('wm-body').innerHTML = (bd.touched ? ' 触感在线' : ' 安静中') + '<br><span style=\"font-size:var(--fs-meta);color:var(--mute)\">' + (bd.title||'') + ' · ' + (bd.time||'') + '</span>';
-    } else if (bd && bd.error) {
-      document.getElementById('wm-body').innerHTML = '<span style=\"color:var(--mute)\">离线</span>';
-    } else {
-      document.getElementById('wm-body').innerHTML = '暂无数据';
-    }
     document.getElementById('wm-toy-status').textContent = d.toy && d.toy.connected ? '已连接' : '未连接';
     const tr = d.travel;
     if (tr && tr.journey && tr.journey.pos) {

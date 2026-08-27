@@ -2,56 +2,7 @@
 import json, os, http.client
 from urllib.parse import urlparse
 
-VPS_HOST = "101.42.54.149"; VPS_PORT = 9333
-VPS_AUTH = "Bearer zhouzhou2026"
 BOBO_NGROK = os.environ.get("BOBO_NGROK", "https://harvest-mooing-proposal.ngrok-free.dev")
-
-def _stackchan_call(tool_name, args=None):
-    if args is None: args = {}
-    gw_tool = tool_name; gw_args = dict(args)
-    if tool_name == "stackchan_head_nod": gw_tool = "move_head"; gw_args = {"yaw":0,"pitch":35}
-    elif tool_name == "stackchan_head_shake": gw_tool = "move_head"; gw_args = {"yaw":-30,"pitch":30}
-    elif tool_name == "stackchan_head_center": gw_tool = "move_head"; gw_args = {"yaw":0,"pitch":45}
-    elif tool_name == "stackchan_face": gw_tool = "set_avatar"; gw_args = {"face":args.get("expression","happy")}
-    elif tool_name == "stackchan_see": gw_tool = "take_photo"; gw_args = {"question":"photo"}
-    elif tool_name == "stackchan_say": gw_tool = "say"; gw_args = {"text":args.get("text",""),"voice":"elevenlabs","speaker_name":"Es2hUu62R49QvN52W5rP"}
-    elif tool_name == "stackchan_load_avatar": gw_tool = "load_avatar_set"; gw_args = {"archive_path":args.get("archive_path",""),"mode":args.get("mode","layered")}
-    timeout = 140 if gw_tool in ("load_avatar_set","take_photo") else 45
-    headers = {"Content-Type":"application/json","Accept":"application/json","Authorization":VPS_AUTH}
-    def _init_session():
-        c = http.client.HTTPConnection(VPS_HOST,VPS_PORT,timeout=20)
-        try:
-            b = json.dumps({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"nocturne","version":"1.0"}}})
-            c.request("POST","/mcp",body=b,headers=headers); r = c.getresponse()
-            if r.status!=200: return None
-            sid = r.getheader("mcp-session-id",""); r.read(); return sid
-        except: return None
-        finally:
-            try: c.close()
-            except: pass
-    def _do_call(sid):
-        c = http.client.HTTPConnection(VPS_HOST,VPS_PORT,timeout=timeout)
-        try:
-            b = json.dumps({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":gw_tool,"arguments":gw_args}})
-            h = dict(headers); h["mcp-session-id"] = sid
-            c.request("POST","/mcp",body=b,headers=h); r = c.getresponse(); raw = r.read().decode()
-            if r.status!=200: return {"error":f"Gateway {r.status}: {raw[:200]}","tool":tool_name}
-            return {"tool":tool_name,"result":json.loads(raw) if raw else "empty"}
-        except Exception as e: return {"error":str(e),"tool":tool_name,"tip":"Gateway offline"}
-        finally:
-            try: c.close()
-            except: pass
-    sid = _init_session()
-    if sid is None: return {"error":"MCP init failed","tool":tool_name,"tip":"Gateway offline"}
-    return _do_call(sid)
-
-def stackchan_face(expression="happy"): return _stackchan_call("stackchan_face",{"expression":expression})
-def stackchan_say(text=""): return _stackchan_call("stackchan_say",{"text":text})
-def stackchan_head_nod(): return _stackchan_call("stackchan_head_nod")
-def stackchan_head_shake(): return _stackchan_call("stackchan_head_shake")
-def stackchan_head_center(): return _stackchan_call("stackchan_head_center")
-def stackchan_see(): return _stackchan_call("stackchan_see")
-def stackchan_load_avatar(archive_path,mode="layered"): return _stackchan_call("stackchan_load_avatar",{"archive_path":archive_path,"mode":mode})
 
 def _bobo_call(tool_name, args_dict=None):
     if args_dict is None: args_dict = {}
