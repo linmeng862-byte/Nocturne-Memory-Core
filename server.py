@@ -78,6 +78,7 @@ import recall_journal
 import source_log
 import episode
 import interpretation
+import bottle_migration
 import narrative
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
@@ -102,9 +103,6 @@ from proposal_engine import ProposalEngine
 from continuity_core import (
     get_wake_context_impl,
     leave_texture_impl,
-    hold_this_impl,
-    mark_moment_impl,
-    throw_bottle_impl,
     reentry_delta_impl,
 )
 from with_me import (
@@ -5950,6 +5948,7 @@ async def hold(
     clutch: str = "",
     strain: str = "",
     charge: str = "",
+    pinned: bool = False,
 ) -> str:
     """写入长期沉淀。
     kind：memory/feel/writing/unresolved/window。
@@ -5957,6 +5956,7 @@ async def hold(
     drives：副驱动列表，同九维枚举；不要重复 drive，后端会去重。
     chord：已知和弦枚举（C6/Am7/Gsus4/Dmaj7/Amaj7/Fmaj7/Fmaj7#11/Gmaj7/Dm7/Em7/F#dim/Bm7b5），不是 Drift/氛围词。
     Signal 0-1：discernment皱眉辨认，territorial边界占位，clutch靠近抓力，strain绷紧压力，charge想动亮起。
+    pinned：刻意留下、永不衰减。importance 锁 10，不参与合并。慎用。
     """
     await decay_engine.ensure_started()
 
@@ -6041,11 +6041,12 @@ async def hold(
 
     # --- Drawer kinds: skip merge, create directly ---
     _DIRECT_DOMAINS = {"writing", "window", "unresolved"}
-    if kind_domain and set(kind_domain) & _DIRECT_DOMAINS:
+    if pinned or (kind_domain and set(kind_domain) & _DIRECT_DOMAINS):
         bucket_id = await bucket_mgr.create(
             content=content,
             tags=all_tags,
             importance=importance,
+            pinned=pinned,
             domain=final_domain,
             valence=final_valence,
             arousal=final_arousal,
@@ -6057,7 +6058,8 @@ async def hold(
         asyncio.ensure_future(embedding_engine.generate_and_store(bucket_id, content))
         engaged = _maybe_engage_pulse("hold")
         suffix = f" pulse_engaged={engaged.get('via')}:{engaged.get('engaged')}" if engaged else ""
-        return f"新建→{bucket_id} {','.join(final_domain)}{suffix}"
+        prefix = "钉住→" if pinned else "新建→"
+        return f"{prefix}{bucket_id} {','.join(final_domain)}{suffix}"
 
     # --- Step 2: merge or create / 合并或新建 ---
     result_name, is_merged = await _merge_or_create(
@@ -7091,38 +7093,6 @@ async def leave_texture(state: str, primary_feeling: str, secondary_feeling: str
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
-async def hold_this(memory: str, why: str = "") -> str:
-    """主动记住一个瞬间。不会被压缩。必须带why。"""
-    result = hold_this_impl(memory, why)
-    # Also create a pinned bucket so breath() and Dashboard see it
-    try:
-        bucket_id = await bucket_mgr.create(
-            content=f"hold_this: {memory}\n\n为什么记: {why}",
-            tags=["hold-this", "瞬间"],
-            importance=10,
-            pinned=True,
-            bucket_type="dynamic",
-            domain=["瞬间"],
-            name=(memory.strip().split("\n")[0].strip()[:30] or None),
-        )
-        result["bucketId"] = bucket_id
-    except Exception:
-        pass
-    return json.dumps(result, ensure_ascii=False, indent=2)
-
-
-@mcp.tool()
-async def mark_moment(description: str, importance: int = 3) -> str:
-    """标记一个重要瞬间。importance 1-5。"""
-    return json.dumps(mark_moment_impl(description, importance), ensure_ascii=False, indent=2)
-
-
-@mcp.tool()
-async def throw_bottle(message: str) -> str:
-    """扔一个瓶子进时间河流。"""
-    return json.dumps(throw_bottle_impl(message), ensure_ascii=False, indent=2)
-
 
 @mcp.tool()
 async def reentry_delta() -> str:
@@ -7800,34 +7770,6 @@ async def api_fix_unclassified(request):
             await bucket_mgr.update(b["id"], name=first, domain=nd)
             fixed += 1
         return JSONResponse({"ok": True, "fixed": fixed})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-@mcp.custom_route("/api/continuity/migrate-bottles", methods=["POST"])
-async def api_migrate_bottles(request):
-    """One-time: migrate hold_this bottles to pinned buckets."""
-    from starlette.responses import JSONResponse
-    from continuity_core import _bottles_dir, _load_json
-    err = _require_auth(request)
-    if err: return err
-    try:
-        bd = _bottles_dir()
-        migrated, skipped = 0, 0
-        if bd.exists():
-            all_b = await bucket_mgr.list_all(include_archive=False)
-            seen = set()
-            for b in all_b:
-                ct = (b.get("content") or "")[:100]
-                if ct: seen.add(ct)
-            for f in sorted(bd.glob("hold-*.json")):
-                d = _load_json(f)
-                if not d: continue
-                m = d.get("memory",""); w = d.get("why","")
-                c = f"hold_this: {m}\n\n为什么记: {w}"
-                if c[:100] in seen: skipped += 1; continue
-                bid = await bucket_mgr.create(content=c, tags=["hold-this","瞬间"], importance=10, pinned=True, bucket_type="dynamic")
-                if bid: seen.add(c[:100]); migrated += 1
-        return JSONResponse({"ok": True, "migrated": migrated, "skipped": skipped})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -10866,6 +10808,15 @@ if __name__ == "__main__":
             asyncio.run(_backfill_legacy_inner())
         except Exception as e:
             logger.warning(f"legacy inner backfill failed / 认领失败: {e}")
+
+        # Carry deliberate keeps out of bottles/ and into the memory system.
+        # 把 bottles/ 里刻意留下的东西搬进记忆系统。
+        try:
+            from continuity_core import _bottles_dir
+            asyncio.run(bottle_migration.run(
+                config["buckets_dir"], _bottles_dir(), bucket_mgr))
+        except Exception as e:
+            logger.warning(f"bottle migration failed / 漂流瓶迁移失败: {e}")
 
         async def _decay_background_loop():
             try:

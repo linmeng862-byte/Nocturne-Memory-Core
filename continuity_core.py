@@ -6,7 +6,7 @@ storage 在 buckets/continuity/ 下：
   continuity.json  — 活的连续性令牌
   story.md         — 我们一起活过的时间
   traces/          — 每个窗口留下的感受剖面
-  bottles/         — 刻意留下的瞬间(hold_this)
+  bottles/         — 刻意留下的瞬间（历史证据，由 bottle_migration 搬进桶）
 """
 
 import json
@@ -155,59 +155,6 @@ def leave_texture_impl(state: str, primary_feeling: str,
         "totalWindows": current_window_count,
         "storyUpdated": True
     }
-
-
-# ── hold_this ─────────────────────────────────────────
-
-def hold_this_impl(memory: str, why: str = "") -> dict:
-    """Claude 主动选择记住一个瞬间。不被压缩。一直保留。"""
-    bottle_id = f"hold-{_now_compact()}-{abs(hash(memory)) % 10000:04d}"
-    entry = {
-        "id": bottle_id,
-        "type": "hold_this",
-        "timestamp": _now(),
-        "memory": memory,
-        "why": why
-    }
-    bottles_dir = _bottles_dir()
-    bottles_dir.mkdir(parents=True, exist_ok=True)
-    _save_json(bottles_dir / f"{bottle_id}.json", entry)
-    _append_md(_story_file(), f"\n> ★ 我选择记住：{memory}\n")
-    return {"held": True, "bottleId": bottle_id}
-
-
-# ── mark_moment ───────────────────────────────────────
-
-def mark_moment_impl(description: str, importance: int = 3) -> dict:
-    """标记一个重要瞬间。importance 1-5。"""
-    moment = {
-        "timestamp": _now(),
-        "description": description,
-        "importance": importance
-    }
-    storage_dir = _get_storage_dir()
-    _append_md(storage_dir / "moments.jsonl",
-               json.dumps(moment, ensure_ascii=False) + "\n")
-    if importance >= 4:
-        _append_md(_story_file(), f"\n> ★ {description}\n")
-    return {"marked": True, "importance": importance}
-
-
-# ── throw_bottle ──────────────────────────────────────
-
-def throw_bottle_impl(message: str) -> dict:
-    """Claude 刻意留下理解。"""
-    bottle_id = f"bottle-{_now_compact()}-{abs(hash(message)) % 10000:04d}"
-    entry = {
-        "id": bottle_id,
-        "type": "throw_bottle",
-        "timestamp": _now(),
-        "message": message
-    }
-    bottles_dir = _bottles_dir()
-    bottles_dir.mkdir(parents=True, exist_ok=True)
-    _save_json(bottles_dir / f"{bottle_id}.json", entry)
-    return {"thrown": True, "bottleId": bottle_id}
 
 
 # ── get_wake_context ──────────────────────────────────
