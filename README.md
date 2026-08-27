@@ -105,6 +105,38 @@ analysis.
 
 For HTTP clients, connect to `http://localhost:8000/mcp`.
 
+### Reaching it over a network
+
+Over stdio nothing is exposed and no password applies. Over
+`streamable-http` or `sse` the server is a network service, and everything
+except the login flow, the dashboard page and `/health` requires a
+credential — `/mcp` included.
+走 stdio 时什么都没有暴露，密码也不适用。走 `streamable-http` / `sse` 时
+服务器就是一个网络服务，除了登录流程、面板页面和 `/health`，
+其余一律需要凭据 —— **`/mcp` 也在内**。
+
+Set both:
+- `OMBRE_API_PASSWORD` — what a person types. May be non-ASCII.
+- `OMBRE_API_TOKEN` — what a client presents. Must be ASCII: HTTP headers
+  cannot carry anything else.
+
+A client presents it as `Authorization: Bearer <token>` or
+`X-Nocturne-Token: <token>`.
+
+**If no password is configured the door is not installed at all**, because
+locking up would lock you out of setting one. Startup warns about this
+loudly. Do not put an un-passworded instance on a network.
+**完全没设密码时，门根本不会安装** —— 否则会把你锁在「设置密码」之外。
+启动时会大声警告。别把没设密码的实例放到网络上。
+
+### Persistent storage
+
+Memories are files under `OMBRE_BUCKETS_DIR`, and the Dockerfile declares
+`VOLUME ["/app/buckets"]`. On a platform that does not mount a volume there,
+every redeploy starts from an empty vault. Mount one before deploying.
+记忆是 `OMBRE_BUCKETS_DIR` 下的文件，Dockerfile 里声明了 `VOLUME ["/app/buckets"]`。
+在没有挂载卷的平台上，**每次重新部署都是从空的记忆库开始**。部署前先挂卷。
+
 ## Storage and models
 
 Memories are ordinary Markdown files with YAML frontmatter. SQLite / JSON
