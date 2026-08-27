@@ -4251,6 +4251,40 @@ def _presented_credential(request) -> str:
     return str(request.headers.get("x-nocturne-token") or "").strip()
 
 
+# Wrong answers cost time. See door_cost.py for why it is a delay and never
+# a lockout, and why the failing path is the only one that ever waits.
+# 答错要花时间。为什么是延迟而不是锁定、
+# 为什么只有失败那条路会等,见 door_cost.py。
+import door_cost
+
+_door_failures = door_cost.FailureLedger()
+
+
+def _door_key(request) -> str:
+    try:
+        fallback = request.client.host if request.client else ""
+    except Exception:
+        fallback = ""
+    return door_cost.client_key(request.headers, fallback)
+
+
+async def _charge_for_wrong_answer(request) -> None:
+    """Wait, then let the caller answer 401. Never raises."""
+    try:
+        delay = _door_failures.note_failure(_door_key(request), time.time())
+        if delay > 0:
+            await asyncio.sleep(delay)
+    except Exception as e:
+        logger.warning(f"door cost not applied / 门的代价没加上: {e}")
+
+
+def _forget_wrong_answers(request) -> None:
+    try:
+        _door_failures.note_success(_door_key(request), time.time())
+    except Exception:
+        pass
+
+
 def _door_is_open(request) -> bool:
     """Whether this request may pass. Anything unexpected means no.
 
@@ -4332,10 +4366,12 @@ async def auth_login(request):
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
     password = body.get("password", "")
     if _verify_any_password(password):
+        _forget_wrong_answers(request)
         token = _create_session()
         resp = JSONResponse({"ok": True})
         resp.set_cookie("ombre_session", token, httponly=True, samesite="lax", max_age=86400 * 7)
         return resp
+    await _charge_for_wrong_answer(request)
     return JSONResponse({"error": "密码错误"}, status_code=401)
 
 
@@ -10894,6 +10930,7 @@ if __name__ == "__main__":
                     return await call_next(request)
                 if _door_is_open(request):
                     return await call_next(request)
+                await _charge_for_wrong_answer(request)
                 return _JSONResponse(
                     {"error": "Unauthorized", "setup_needed": _is_setup_needed()},
                     status_code=401,
