@@ -274,6 +274,16 @@ def build_bundle(selected: list[dict], elapsed: dict, mode: str,
     Every item carries its bucket id and the reason it was chosen, so the
     agent can go back to it (wander_mark, trace) or disagree with it.
     每条都带 bucket id 和入选理由，agent 可以回去找它、标记它，也可以不认它。
+
+    `kind` says what sort of thing this is. Memories and feels are selected
+    from one pool and were then rendered identically — the agent got a flat
+    run of statements about the past with no way to tell "this happened"
+    from "this is what it felt like". They are different claims and carry
+    different authority, so the type has to survive into the bundle.
+    kind 说明这是什么。memory 和 feel 本来就是从同一个池子里选的，
+    但渲染出来一模一样 —— agent 拿到的是一串关于过去的陈述句，
+    分不出哪句是「发生了什么」、哪句是「当时什么感觉」。
+    这是两种不同的断言，权威性也不同，类型必须活着进 bundle。
     """
     if mode not in VALID_MODES:
         raise ValueError(f"unknown recall mode: {mode}")
@@ -282,6 +292,7 @@ def build_bundle(selected: list[dict], elapsed: dict, mode: str,
         meta = row["bucket"].get("metadata", {})
         items.append({
             "id": row["id"],
+            "kind": str(meta.get("type") or "memory"),
             "name": meta.get("name") or "",
             "created": str(meta.get("created") or "")[:19],
             "content": row["bucket"].get("content", ""),
@@ -300,8 +311,112 @@ def build_bundle(selected: list[dict], elapsed: dict, mode: str,
     }
 
 
-def format_bundle(bundle: dict) -> str:
-    """Render for injection. Sections are labelled by what they are."""
+# ---------------------------------------------------------
+# Rendering
+#
+# The two modes were built as different acts and then handed to one
+# renderer, so `mode` reached format_bundle and was never read: involuntary
+# and deliberate produced byte-identical text. The distinction survived in
+# the data model and died at the last step.
+# 两种模式是当作两件事设计的，最后却交给同一个渲染器，
+# 于是 `mode` 到了 format_bundle 就再没人看过它：
+# 不由自主和刻意回想输出的字符串逐字节相同。
+# 这个区分活在数据模型里，死在最后一步。
+#
+# It matters because a past that arrives stamped with an exact date, a
+# bucket id and a relevance score is, by definition, a search result. Nobody
+# involuntarily remembers something at 0.33 relevance. The ids and scores
+# are not deleted — they stay in the JSON, which is where a client that
+# wants to mark or trace something reads them from. They are just not part
+# of what arrives as experience.
+# 因为一段带着精确日期、bucket id 和相关性评分到达的过去，
+# 定义上就是一条检索结果。没有人会以 0.33 的相关度不由自主地想起什么。
+# id 和分数没有删 —— 它们留在 JSON 里，要标记、要追溯的客户端从那儿读。
+# 它们只是不属于「作为经验到达」的那部分。
+# ---------------------------------------------------------
+
+# Deliberately coarse, and deliberately not a clock. An exact timestamp is
+# how a record is filed; "上个礼拜" is how a person places something. The
+# fact is still in the bundle under `created` — this only changes what the
+# sentence sounds like, never what is known.
+# 刻意粗，也刻意不是时钟。精确时间戳是**归档**的方式，
+# 「上个礼拜」是**人**安放一件事的方式。
+# 事实还在 bundle 的 `created` 里 —— 这只改句子听起来的样子，不改知道什么。
+_COARSE_LADDER = (
+    (0, "今天"),
+    (1, "昨天"),
+    (6, "这几天"),
+    (13, "上个礼拜"),
+    (45, "上个月"),
+    (120, "几个月前"),
+    (300, "大半年前"),
+)
+
+
+def coarse_when(created, now: datetime) -> str:
+    """Place a memory in time the way a person would, or say nothing."""
+    dt = _parse_dt(created)
+    if not dt:
+        return ""
+    days = (now.date() - dt.date()).days
+    if days < 0:
+        return ""
+    for limit, phrase in _COARSE_LADDER:
+        if days <= limit:
+            return phrase
+    if dt.year != now.year:
+        return f"{dt.year} 年那阵子"
+    return "很久以前"
+
+
+_KIND_LABEL = {"feel": "当时的感觉"}
+
+
+def _format_deliberate(bundle: dict, lines: list[str]) -> None:
+    """She went looking. Give her the filing: dates, ids, why it scored."""
+    lines.append("")
+    lines.append("[浮上来的过去]")
+    for item in bundle.get("items") or []:
+        head = f"· [{item['created'][:10]}]"
+        label = _KIND_LABEL.get(item.get("kind", ""))
+        if label:
+            head += f"〔{label}〕"
+        if item["name"]:
+            head += f" {item['name']}"
+        lines.append(head)
+        lines.append(f"  {item['content'].strip()}")
+        why = item["why"]
+        top = sorted(why.items(), key=lambda kv: -kv[1])[:2]
+        why_text = "、".join(f"{k} {v:.2f}" for k, v in top if v > 0)
+        lines.append(f"  ↳ id:{item['id']}" + (f"（{why_text}）" if why_text else ""))
+
+
+def _format_involuntary(bundle: dict, lines: list[str], now: datetime) -> None:
+    """It arrived on its own. No ids, no scores, no exact dates.
+
+    Feels are rendered first. Not because they matter more, but because
+    that is the order the thing actually happens in: something tightens,
+    and only then does it come back what it was about. Leading with the
+    facts and appending the affect as a footnote is the grammar of a
+    record, not of being there.
+    feel 排在前面。不是因为它更重要，而是因为事情本来就是这个顺序发生的：
+    先是某处紧了一下，然后才想起来是为了什么。
+    先给事实、再把感受附在脚注里，那是**档案**的语序，不是**亲历**的语序。
+    """
+    items = list(bundle.get("items") or [])
+    items.sort(key=lambda it: 0 if it.get("kind") == "feel" else 1)
+    lines.append("")
+    for item in items:
+        when = coarse_when(item.get("created"), now)
+        body = item["content"].strip()
+        lines.append(f"{when}，{body}" if when else body)
+        lines.append("")
+    if lines and lines[-1] == "":
+        lines.pop()
+
+
+def format_bundle(bundle: dict, now: datetime | None = None) -> str:
+    """Render for injection. How it reads depends on how it arrived."""
     lines = []
     t = bundle.get("time") or {}
     if t.get("known"):
@@ -311,24 +426,16 @@ def format_bundle(bundle: dict) -> str:
         lines.append(f"[现在] {t['now']}")
         lines.append("[距上次交互] 没有记录——这可能是第一次")
 
-    items = bundle.get("items") or []
-    if not items:
+    if not (bundle.get("items") or []):
         lines.append("")
         lines.append("[没有浮上来的东西] 权重池是平的。这不是错误。")
         return "\n".join(lines)
 
-    lines.append("")
-    lines.append("[浮上来的过去]")
-    for item in items:
-        head = f"· [{item['created'][:10]}]"
-        if item["name"]:
-            head += f" {item['name']}"
-        lines.append(head)
-        lines.append(f"  {item['content'].strip()}")
-        why = item["why"]
-        top = sorted(why.items(), key=lambda kv: -kv[1])[:2]
-        why_text = "、".join(f"{k} {v:.2f}" for k, v in top if v > 0)
-        lines.append(f"  ↳ id:{item['id']}" + (f"（{why_text}）" if why_text else ""))
+    if bundle.get("mode") == INVOLUNTARY:
+        _format_involuntary(bundle, lines, now or datetime.now())
+    else:
+        _format_deliberate(bundle, lines)
+
     lines.append("")
     lines.append("以上是证据，不是结论。怎么理解由你。")
     return "\n".join(lines)

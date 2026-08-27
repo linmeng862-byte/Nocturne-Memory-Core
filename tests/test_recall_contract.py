@@ -220,3 +220,97 @@ def test_journal_is_append_only_across_touches(tmp_path):
         recall_journal.record_touch(d, f"r{i}", recall.DELIBERATE, [f"b{i}"])
     rows = recall_journal.read_events(d)
     assert [r["recall_id"] for r in rows] == ["r0", "r1", "r2", "r3"]
+
+
+# ---------------------------------------------------------
+# 3. How it arrived decides how it reads
+#
+# Both modes went through one renderer and `mode` was never read, so
+# involuntary and deliberate recall produced byte-identical text. A past
+# that arrives stamped with an exact date, a bucket id and a relevance
+# score is a search result, whatever the mode field says.
+# 两种模式共用一个渲染器，`mode` 从没被读过，
+# 于是不由自主和刻意回想输出逐字节相同。
+# 带着精确日期、bucket id 和相关分到达的过去，不管 mode 写的是什么，都是检索结果。
+# ---------------------------------------------------------
+
+def _bundle(mode, buckets, **kw):
+    return recall.build_bundle(
+        recall.select(buckets, NOW, limit=len(buckets)),
+        recall.describe_elapsed("", NOW), mode, recall_id="r1", **kw)
+
+
+def test_the_two_modes_no_longer_render_the_same():
+    buckets = [_bucket("abc123", content="一条记忆")]
+    a = recall.format_bundle(_bundle(recall.INVOLUNTARY, buckets), now=NOW)
+    b = recall.format_bundle(_bundle(recall.DELIBERATE, buckets), now=NOW)
+    assert a != b, "mode 又被忽略了——两种到达方式渲染成了同一段文字"
+
+
+def test_involuntary_carries_no_ids_no_scores_no_exact_dates():
+    """None of the filing apparatus. Nobody remembers something at 0.33."""
+    buckets = [_bucket("abc123", content="一条记忆",
+                       created=NOW - timedelta(days=9))]
+    text = recall.format_bundle(_bundle(recall.INVOLUNTARY, buckets), now=NOW)
+    assert "abc123" not in text
+    assert "id:" not in text
+    assert "0." not in text.split("[现在]")[-1].split("\n", 2)[-1]
+    assert "2026-08-18" not in text
+    assert "上个礼拜" in text
+    assert "一条记忆" in text
+
+
+def test_deliberate_still_carries_ids_back():
+    """She went looking, so she gets the filing. This is the older contract."""
+    buckets = [_bucket("abc123", content="一条记忆")]
+    text = recall.format_bundle(_bundle(recall.DELIBERATE, buckets), now=NOW)
+    assert "id:abc123" in text
+    assert "[2026-08-27]" in text
+
+
+def test_bundle_says_which_kind_each_item_is():
+    """memory and feel come from one pool; without kind they are one blur."""
+    bundle = _bundle(recall.DELIBERATE, [
+        _bucket("m1", content="发生了什么"),
+        _bucket("f1", content="当时什么感觉", type="feel"),
+    ])
+    kinds = {it["id"]: it["kind"] for it in bundle["items"]}
+    assert kinds == {"m1": "memory", "f1": "feel"}
+
+
+def test_feel_is_marked_in_deliberate_text():
+    bundle = _bundle(recall.DELIBERATE,
+                     [_bucket("f1", content="当时什么感觉", type="feel")])
+    assert "当时的感觉" in recall.format_bundle(bundle, now=NOW)
+
+
+def test_involuntary_leads_with_the_feel():
+    """Something tightens first; only then does it come back what it was about."""
+    bundle = _bundle(recall.INVOLUNTARY, [
+        _bucket("m1", content="发生了什么", importance=10),
+        _bucket("f1", content="当时什么感觉", type="feel", importance=1),
+    ])
+    text = recall.format_bundle(bundle, now=NOW)
+    assert text.index("当时什么感觉") < text.index("发生了什么")
+
+
+def test_coarse_when_never_invents_a_future():
+    assert recall.coarse_when((NOW + timedelta(days=3)).isoformat(), NOW) == ""
+    assert recall.coarse_when("", NOW) == ""
+    assert recall.coarse_when("不是时间", NOW) == ""
+
+
+def test_coarse_when_walks_one_direction_only():
+    """A ladder that doubles back would place an older memory as more recent."""
+    seen = []
+    for d in (0, 1, 3, 10, 30, 90, 200, 500):
+        seen.append(recall.coarse_when((NOW - timedelta(days=d)).isoformat(), NOW))
+    assert all(seen), "某一档掉出了梯子"
+    assert len(set(seen)) == len(seen), f"两个不同的距离说成了同一句：{seen}"
+
+
+def test_read_only_claim_survives_both_renderings():
+    for mode in (recall.INVOLUNTARY, recall.DELIBERATE):
+        b = _bundle(mode, [_bucket("b1")])
+        recall.format_bundle(b, now=NOW)
+        assert b["read_only"] == {"wrote_anything": False, "touch_recorded": False}
