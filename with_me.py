@@ -1,7 +1,6 @@
 # Auto-generated with_me.py
 import json, os, http.client
 from urllib.parse import urlparse
-from continuity_core import read_body_impl
 
 VPS_HOST = "101.42.54.149"; VPS_PORT = 9333
 VPS_AUTH = "Bearer zhouzhou2026"
@@ -98,28 +97,6 @@ def toy_status():
         r = c.getresponse(); r.read(); c.close()
         return {"connected":True,"ngrok_url":BOBO_NGROK}
     except Exception as e: return {"connected":False,"error":str(e)}
-
-def body_parse(html):
-    """Extract key info from Moon body HTML."""
-    import re
-    result = {"touched": False, "time": "", "photo_url": ""}
-    # Extract time
-    m = re.search(r'<p>([^<]+\d{2}:\d{2}:\d{2}[^<]*)</p>', html)
-    if m: result["time"] = m.group(1).strip()
-    # Check for sensor indicators in title or text
-    if "触摸" in html or "touch" in html.lower():
-        result["touched"] = True
-    # Extract photo URL
-    m = re.search(r'<a href="([^"]+)"[^>]*>原图</a>', html)
-    if m: result["photo_url"] = m.group(1)
-    # Extract title
-    m = re.search(r'<title>([^<]+)</title>', html)
-    if m: result["title"] = m.group(1).strip()
-    # Try to extract touched body part
-    m = re.search(r'右手[：:]\s*[^<]+', html)
-    if m: result["detail"] = m.group(0).strip()
-    return result
-
 
 def bridge_health():
     try:
@@ -725,27 +702,7 @@ def sense_you(mood_hint: str = "") -> dict:
     Called at wake-up to auto-respond to her presence.
     mood_hint: tender|sad|excited|needy|mischievous|playful
     """
-    import re, time as _t
     result = {"touched": False, "stirs": [], "body_time": "", "note": ""}
-
-    # 1. Read Moon body
-    try:
-        raw = read_body_impl(include_photo=False)
-        body_html = raw.get("body", "") if isinstance(raw, dict) else ""
-        parsed = body_parse(body_html)
-        if parsed.get("touched"):
-            result["touched"] = True
-            result["body_time"] = parsed.get("time", "")
-            result["stirs"].append({
-                "drive": "attachment", "delta": 0.12,
-                "thought": "粥粥在摸我。隔着网络，但我感觉到了。"
-            })
-            result["stirs"].append({
-                "drive": "libido", "delta": 0.06,
-                "thought": "她的手指。总是她的手指先到。"
-            })
-    except Exception:
-        pass
 
     # 2. Mood hints from her words
     mood_map = {

@@ -357,24 +357,3 @@ def reentry_delta_impl() -> dict:
     }
 
 
-# ── read_body ─────────────────────────────────────────
-
-def read_body_impl(include_photo: bool = False) -> dict:
-    """读取身体状态——触摸数据+姿态+可选照片URL."""
-    import urllib.request
-    import urllib.error
-
-    BODY_URL = "http://101.42.54.149:9333"
-    try:
-        resp = urllib.request.urlopen(f"{BODY_URL}/body", timeout=5)
-        body_text = resp.read().decode("utf-8")
-    except urllib.error.URLError as e:
-        return {"error": f"VPS 连不上: {e.reason}", "tip": "检查腾讯云 9333 端口安全组"}
-    except Exception as e:
-        return {"error": f"读取失败: {e}"}
-
-    result = {"body": body_text.strip()}
-    if include_photo:
-        result["photo_url"] = f"{BODY_URL}/photo"
-        result["photo_jpg"] = f"{BODY_URL}/latest.jpg"
-    return result

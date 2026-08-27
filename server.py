@@ -106,7 +106,6 @@ from continuity_core import (
     mark_moment_impl,
     throw_bottle_impl,
     reentry_delta_impl,
-    read_body_impl,
 )
 from with_me import (
     stackchan_face,
@@ -120,7 +119,6 @@ from with_me import (
     toy_suck,
     toy_stop,
     toy_status,
-    body_parse,
     bridge_health,
     travel_state,
     nowhere_open,
@@ -7141,11 +7139,6 @@ async def reentry_delta() -> str:
 
 
 @mcp.tool()
-async def read_body(include_photo: bool = False) -> str:
-    """读取身体状态——触摸数据+姿态+可选照片URL。"""
-    return json.dumps(read_body_impl(include_photo), ensure_ascii=False, indent=2)
-
-@mcp.tool()
 async def sense_you_tool(mood_hint: str = "") -> str:
     """感知她的触碰和情绪，自动调整Drive。mood_hint: tender/sad/excited/needy/mischievous/affectionate"""
     sensed = sense_you(mood_hint)
@@ -7288,11 +7281,7 @@ async def api_with_me_status(request):
     from starlette.responses import JSONResponse
     err = _require_auth(request)
     if err: return err
-    raw = read_body_impl(include_photo=False)
-    raw_text = raw.get("body", "") if isinstance(raw, dict) else ""
-    parsed = body_parse(raw_text)
     return JSONResponse({
-        "body": parsed,
         "toy": toy_status(),
         "bridge": bridge_health(),
         "travel": travel_state(),
