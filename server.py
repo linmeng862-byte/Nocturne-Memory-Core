@@ -128,7 +128,6 @@ from with_me import (
     nowhere_quest_check,
     nowhere_achievements,
     nowhere_collect_souvenir,
-    sense_you,
 )
 
 # MCP tool enums — keep in sync with desire_engine.DRIVE_KEYS / CHORD_KEYS.
@@ -7129,22 +7128,6 @@ async def throw_bottle(message: str) -> str:
 async def reentry_delta() -> str:
     """会话中途增量刷新。"""
     return json.dumps(reentry_delta_impl(), ensure_ascii=False, indent=2)
-
-
-@mcp.tool()
-async def sense_you_tool(mood_hint: str = "") -> str:
-    """感知她的触碰和情绪，自动调整Drive。mood_hint: tender/sad/excited/needy/mischievous/affectionate"""
-    sensed = sense_you(mood_hint)
-    # Apply stirs to desire engine
-    applied = []
-    for s in sensed.get("stirs", []):
-        try:
-            _desire.stir(s["drive"], s["delta"], thought=s.get("thought", ""))
-            applied.append(f"  {s['drive']}: +{s['delta']:.2f}")
-        except Exception:
-            pass
-    result = {"sensed": sensed["note"], "applied": applied}
-    return json.dumps(result, ensure_ascii=False)
 
 
 # With Me — Hardware presence tools
