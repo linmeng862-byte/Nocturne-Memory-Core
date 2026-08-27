@@ -12,6 +12,8 @@ import httpx
 
 from desire_engine import DRIVE_EVENT_SCHEMA, DRIVE_KEYS, normalize_drive_key, normalize_drive_event_brain
 from identity import AGENT_NAME, AGENT_PERSONA, HUMAN_NAME
+from utils import append_jsonl
+import source_log
 
 
 RUBRIC_VERSION = "dialogue_residue_v1_2026-06-27"
@@ -204,8 +206,12 @@ def append_dialogue_residue_ledger(buckets_dir: str, row: dict) -> None:
     payload = dict(row)
     payload.setdefault("timestamp", time.time())
     payload.setdefault("iso", _now_iso())
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    # Serialized + fsynced: this ledger is the closest thing the system has to
+    # a raw record of what was actually said, so a half-written line from a
+    # concurrent endpoint costs an event outright.
+    # 串行 + 落盘：这本账是全系统最接近「真的说过什么」的原始记录，
+    # 并发端写了半行就是直接丢掉一个事件。
+    append_jsonl(str(path), payload)
 
 
 def load_dialogue_residue_state(buckets_dir: str) -> dict:
@@ -216,8 +222,37 @@ def load_dialogue_residue_state(buckets_dir: str) -> dict:
         return {}
 
 
-def save_dialogue_residue_state(buckets_dir: str, state: dict, *, ledger_stage: str = "state") -> dict:
+def save_dialogue_residue_state(buckets_dir: str, state: dict, *, ledger_stage: str = "state",
+                                endpoint: str = "") -> dict:
+    """Record the reading, after recording what it was a reading of.
+
+    Source first, always. If the utterance log write fails this raises and no
+    interpretation is stored — an interpretation whose evidence was never
+    saved is worse than no interpretation at all, because it still looks
+    citable.
+    永远先记原始。如果话语账写失败,这里会抛错,解释一条都不会存 ——
+    一条证据从没存下来的解释比没有解释更糟,因为它看起来照样可以引用。
+    """
     normalized = normalize_dialogue_residue_event(state)
+
+    # SOURCE: what was said. Deduped by content across the overlapping 2+2
+    # windows, so one sentence is one event no matter how many windows carried
+    # it up.
+    # SOURCE:说了什么。按内容在重叠的 2+2 滑窗之间去重,
+    # 这样一句话就是一个事件,不管多少个窗把它带上来。
+    derived_from = source_log.record(
+        buckets_dir, normalized.get("messages") or [],
+        window_id=normalized.get("window_id", ""), endpoint=endpoint,
+    )
+
+    # INTERPRETATION: what somebody made of it. Carries a pointer back to its
+    # evidence and the rubric it was produced under, so a later rubric can
+    # disagree with this one instead of silently replacing it.
+    # INTERPRETATION:某人从中读出了什么。带着指回证据的指针和当时用的尺子,
+    # 这样将来的尺子可以跟这一把**不同意**,而不是悄悄把它换掉。
+    normalized["authority"] = "interpretation"
+    normalized["derived_from"] = derived_from
+
     _atomic_write_json(state_path(buckets_dir), normalized)
     append_dialogue_residue_ledger(buckets_dir, {"stage": ledger_stage, "event": normalized})
     return normalized
@@ -342,6 +377,21 @@ def normalize_dialogue_residue_event(event: dict | None, *, messages: list[dict]
     # The older pair supplies context to the analyzer, but only the newest
     # user+assistant exchange is allowed to mutate Drive. This prevents the
     # overlapping 2+2 windows from charging the same exchange twice.
+    # What the analyzer itself said, before the keyword rules below get a vote.
+    # Recording rubric_version without recording the rule layer's input means
+    # knowing a reading was taken with an old ruler but having no way to
+    # measure again with a new one. Kept so a later rubric can re-derive.
+    # 分析器自己说的,在下面的关键词规则投票之前。
+    # 只记 rubric_version 而不记规则层的输入,等于知道「这是用旧尺子量的」
+    # 却没法用新尺子重量一遍。留着,好让将来的尺子可以重新推导。
+    analyzer_reading = {
+        "primary_drive": primary,
+        "secondary_drives": dict(secondary),
+        "intensity": round(intensity, 4),
+        "brain": dict(brain),
+    }
+    rules_fired: list[str] = []
+
     focus_msg = [m for m in msg if m.get("focus")] or msg
     combined_text = "\n".join(m.get("text", "") for m in focus_msg)
     has_territorial_cue = any(cue in combined_text for cue in TERRITORIAL_CUES)
@@ -350,6 +400,7 @@ def normalize_dialogue_residue_event(event: dict | None, *, messages: list[dict]
     has_house_system_cue = any(cue in combined_text for cue in HOUSE_SYSTEM_CUES)
     has_external_discussion = any(cue in combined_text for cue in EXTERNAL_DISCUSSION_CUES)
     if has_external_discussion and not has_territorial_cue and not territorial_event:
+        rules_fired.append("external_discussion")
         brain["target"] = "external"
         brain["anchor_target"] = "outside"
         brain["novelty_pull"] = max(_clamp(brain.get("novelty_pull")), 0.42)
@@ -358,6 +409,7 @@ def normalize_dialogue_residue_event(event: dict | None, *, messages: list[dict]
             primary = "curiosity"
             intensity = max(min(intensity, 0.18), 0.08)
     elif has_territorial_cue or territorial_event:
+        rules_fired.append("territorial_event" if territorial_event else "territorial_cue")
         alarm_floor = 0.65 if territorial_event else 0.58
         brain["territorial_alarm"] = max(_clamp(brain.get("territorial_alarm")), alarm_floor)
         brain["tension_load"] = max(_clamp(brain.get("tension_load")), 0.18)
@@ -375,6 +427,7 @@ def normalize_dialogue_residue_event(event: dict | None, *, messages: list[dict]
             primary = "possessiveness"
             intensity = max(intensity, 0.18 if territorial_event else 0.12)
     elif has_house_system_cue:
+        rules_fired.append("house_system_cue")
         brain["target"] = "house"
         brain["anchor_target"] = "house"
         brain["house_need"] = max(_clamp(brain.get("house_need")), 0.42)
@@ -388,6 +441,7 @@ def normalize_dialogue_residue_event(event: dict | None, *, messages: list[dict]
             primary = "stewardship"
             intensity = max(intensity, 0.08)
     elif primary == "attachment" and not _has_attachment_cue(msg, {**event, "brain": brain}):
+        rules_fired.append("attachment_without_cue")
         if intensity <= 0.16:
             primary = ""
             intensity = 0.0
@@ -424,6 +478,13 @@ def normalize_dialogue_residue_event(event: dict | None, *, messages: list[dict]
         "messages": msg,
         "window_id": wid,
         "rubric_version": RUBRIC_VERSION,
+        # The rule layer's input and what it changed. Present even when nothing
+        # fired, so "no rule touched this" is recorded as a fact rather than
+        # inferred from an absence.
+        # 规则层的输入,以及它改了什么。就算一条规则都没触发也在,
+        # 这样「没有规则动过这条」是记下来的事实,而不是从「没有记录」推出来的。
+        "analyzer_reading": analyzer_reading,
+        "rules_fired": rules_fired,
         "status": status,
         "created_at": event.get("created_at") or time.time(),
         "created_iso": event.get("created_iso") or _now_iso(),

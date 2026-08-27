@@ -71,14 +71,22 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP
 
-from bucket_manager import BucketManager
+from bucket_manager import (BucketManager, BucketRevision, HistoryProtected,
+                            StaleWrite)
+import recall
+import recall_journal
+import source_log
+import episode
+import interpretation
+import narrative
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
 from embedding_engine import EmbeddingEngine
 from import_memory import ImportEngine
 from latent_note_view import latent_notes_for_display
 from identity import AGENT_NAME, AGENT_PERSONA, HUMAN_NAME
-from utils import load_config, setup_logging, strip_wikilinks, count_tokens_approx, now_iso
+from utils import (load_config, setup_logging, strip_wikilinks, count_tokens_approx,
+                   now_iso, find_exact_duplicate)
 from desire_engine import (
     CHORD_KEYS,
     DRIVE_BASELINES,
@@ -836,7 +844,38 @@ def _dialogue_residue_should_apply(event: dict) -> bool:
     return has_primary or has_discernment
 
 
-async def _refine_dialogue_residue_background(messages: list[dict], window_id: str) -> None:
+# ============================================================
+# Which body is this. / 这是哪个身体。
+#
+# Declared by the client, never inferred. Guessing from User-Agent or IP
+# would be a judgement wearing the costume of a fact — and it would land in
+# the source log, which is the one place a judgement must never reach.
+# 由客户端声明,绝不推断。从 User-Agent 或 IP 反推是一个判断穿着事实的衣服 ——
+# 而它会落进原始账,那是最不该让判断进去的地方。
+#
+# A client that says nothing is recorded as "unknown". Not knowing which body
+# spoke is itself a fact worth keeping; a plausible guess in its place is not.
+# 什么都没说的客户端记成 "unknown"。
+# 「不知道是哪个身体说的」本身就是一个值得留下的事实;拿一个听起来合理的猜测顶替它,不是。
+# ============================================================
+ENDPOINT_UNKNOWN = "unknown"
+_ENDPOINT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+
+
+def _declared_endpoint(body: dict | None = None, request=None) -> str:
+    declared = ""
+    if isinstance(body, dict):
+        declared = str(body.get("endpoint") or "").strip()
+    if not declared and request is not None:
+        try:
+            declared = str(request.headers.get("x-nocturne-endpoint") or "").strip()
+        except Exception:
+            declared = ""
+    return declared if _ENDPOINT_RE.match(declared) else ENDPOINT_UNKNOWN
+
+
+async def _refine_dialogue_residue_background(messages: list[dict], window_id: str,
+                                              endpoint: str = ENDPOINT_UNKNOWN) -> None:
     """Analyze a 2+2 dialogue window after Stop; skipped windows are handled before scheduling."""
     try:
         event = await classify_dialogue_residue_dp(
@@ -844,7 +883,8 @@ async def _refine_dialogue_residue_background(messages: list[dict], window_id: s
             state_context=_dialogue_residue_context_snapshot(),
             window_id=window_id,
         )
-        saved = save_dialogue_residue_state(config["buckets_dir"], event, ledger_stage="dp_refined")
+        saved = save_dialogue_residue_state(config["buckets_dir"], event,
+                                            ledger_stage="dp_refined", endpoint=endpoint)
         result = {}
         if _dialogue_residue_should_apply(saved):
             result = _desire.apply_drive_event(saved)
@@ -1007,6 +1047,18 @@ def _init_marks_table() -> None:
             )
             """
         )
+        # A mark is a fact about a reader, not about the memory. Without
+        # these, "认" cannot say whether it was her or him, or from which
+        # body — and two readers disagreeing looks like one reader
+        # contradicting themselves.
+        # 一条 mark 是关于**读者**的事实,不是关于那条记忆的。没有这两列,
+        # 「认」说不出是她还是他、从哪个身体标的 ——
+        # 两个读者不一致会看起来像一个读者自相矛盾。
+        for column in ("actor TEXT", "endpoint TEXT"):
+            try:
+                conn.execute(f"ALTER TABLE marks ADD COLUMN {column}")
+            except sqlite3.OperationalError:
+                pass  # already present
         conn.execute("CREATE INDEX IF NOT EXISTS idx_marks_bucket_id ON marks(bucket_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_marks_mark ON marks(mark)")
         conn.commit()
@@ -1028,7 +1080,8 @@ def _load_all_marks() -> dict[str, list[dict]]:
     try:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT id, bucket_id, mark, note, timestamp FROM marks ORDER BY timestamp ASC, id ASC"
+            "SELECT id, bucket_id, mark, note, timestamp, actor, endpoint "
+            "FROM marks ORDER BY timestamp ASC, id ASC"
         ).fetchall()
     finally:
         conn.close()
@@ -1073,19 +1126,99 @@ def _bucket_tags(meta: dict) -> set[str]:
     return {str(t).strip().lower() for t in tags if str(t).strip()}
 
 
-def _guess_wander_domain(bucket: dict, mark_rows: list[dict] = None) -> str:
+# Grandfathered memories, loaded once rather than per bucket: wander scans
+# every bucket and re-reading the log each time would be quadratic.
+# 认领过的记忆,加载一次而不是每个桶读一次:wander 会扫全部桶,
+# 每次都重读账本会变成平方级。
+_LEGACY_INNER_CACHE: dict = {"ids": None}
+
+
+def _legacy_inner_ids() -> set:
+    if _LEGACY_INNER_CACHE["ids"] is None:
+        try:
+            _LEGACY_INNER_CACHE["ids"] = interpretation.legacy_inner_ids(config["buckets_dir"])
+        except OSError as e:
+            logger.warning(f"legacy inner ids unavailable / 认领名单读不到: {e}")
+            return set()
+    return _LEGACY_INNER_CACHE["ids"]
+
+
+async def _backfill_legacy_inner() -> int:
+    """Claim every memory already being read as inner, once.
+
+    Runs before the domain field stops being consulted. Skipping it would
+    silently demote every memory whose promotion predates the marks table —
+    a behaviour loss disguised as a refactor.
+    在 domain 字段不再被查询**之前**跑。跳过它,
+    会静默降级掉每一条升级早于 marks 表的记忆 —— 一次伪装成重构的行为丢失。
+    """
+    marker = os.path.join(config["buckets_dir"], ".legacy_inner_claimed")
+    if os.path.exists(marker):
+        return 0
+
+    claimed = 0
+    try:
+        buckets = await bucket_mgr.list_all(include_archive=True)
+    except Exception as e:
+        logger.warning(f"legacy inner backfill skipped / 认领跳过: {e}")
+        return 0
+    for b in buckets:
+        if "inner" not in _bucket_domains(b.get("metadata", {})):
+            continue
+        try:
+            if interpretation.grandfather_inner(config["buckets_dir"], b.get("id", "")):
+                claimed += 1
+        except OSError as e:
+            logger.warning(f"could not grandfather {b.get('id')}: {e}")
+    # Written only after a full pass finished. A crash midway leaves the
+    # marker absent, so the next boot scans again rather than leaving some
+    # memories unclaimed forever — grandfathering is idempotent, so redoing
+    # the finished part costs nothing.
+    # 只在完整跑完一遍之后才写。中途崩溃时标记不存在,下次启动会重扫,
+    # 而不是让一部分记忆永远没人认领 —— 认领是幂等的,重做已完成的部分不花钱。
+    try:
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write(now_iso())
+    except OSError as e:
+        logger.warning(f"could not write claim marker / 认领标记写不下: {e}")
+
+    _LEGACY_INNER_CACHE["ids"] = None  # force reload
+    if claimed:
+        logger.info(f"Grandfathered {claimed} inner memories / 认领了 {claimed} 条 inner 记忆")
+    return claimed
+
+
+def _guess_wander_domain(bucket: dict, mark_rows: list[dict] = None,
+                         legacy_inner_ids: set | None = None) -> str:
     meta = bucket.get("metadata", {})
     marks = _mark_counts(mark_rows or [])
     domains = _bucket_domains(meta)
     tags = _bucket_tags(meta)
 
-    if marks["private"] or "private" in domains:
+    if _is_private_bucket(bucket, mark_rows):
         return "private"
-    inner_removed = (marks["remove_inner"] > 0 or marks["不认"] >= 2) and "inner" not in domains
-    if "inner" in domains or (
-        not inner_removed
-        and (marks["inner"] or (marks["认"] >= 3 and _has_cross_date_recognition(mark_rows or [])))
-    ):
+
+    # The reading comes from the marks. It used to come from the domain field
+    # first — `"inner" in domains or (...)` — which meant the stored flag
+    # overrode the evidence: two rejections could not turn a memory around
+    # while the field still said inner. That is derived state feeding back
+    # into what it was derived from.
+    # 读法从 marks 来。以前是先看 domain 字段 —— `"inner" in domains or (...)` ——
+    # 那意味着存下来的标记压过了证据:只要字段还写着 inner,
+    # 两次「不认」就翻不动它。那是派生状态在倒灌回它自己的来源。
+    #
+    # A memory promoted before this layer existed is carried forward as
+    # evidence via the interpretation log, not by consulting the field again.
+    # 早于这一层被升上去的记忆,通过解释账本作为**证据**带过来,
+    # 而不是再去问一次那个字段。
+    bucket_id = str(bucket.get("id") or "")
+    reading = interpretation.standing_reading(
+        mark_rows or [],
+        legacy_inner=bucket_id in (
+            _legacy_inner_ids() if legacy_inner_ids is None else legacy_inner_ids
+        ),
+    )
+    if reading["reading"] == interpretation.READING_INNER:
         return "inner"
     if "letter_human" in domains or "letter_human" in tags:
         return "letter_human"
@@ -1098,8 +1231,41 @@ def _guess_wander_domain(bucket: dict, mark_rows: list[dict] = None) -> str:
     return "memory"
 
 
-def _is_private_bucket(bucket: dict, mark_rows: list[dict]) -> bool:
-    return _guess_wander_domain(bucket, mark_rows) == "private"
+def _is_private_bucket(bucket: dict, mark_rows: list[dict] = None) -> bool:
+    """The single privacy decision. Every gate must ask this one.
+
+    Privacy used to be decided in three places that each went blind to
+    something the others caught:
+    隐私以前在三处各自判定,而且每一处都对另外两处能看见的东西瞎掉:
+        _is_private_bucket   saw marks + domains, missed tags
+        the analyzer list    saw domains + tags, missed marks
+        /api/sanctum/breath  saw domains + tags, missed marks
+    So a tag-private memory stayed visible in wander, and a mark-private one
+    reached both the analyzer candidates and an injection path. Each gate
+    leaked exactly what the others stopped.
+    于是 tag 标 private 的记忆在 wander 里照样看得见,
+    mark 标 private 的记忆同时进了 analyzer 候选和一条注入路径。
+    每一道门漏掉的,正好是另外两道拦住的。
+
+    Any evidence of privacy is enough. This is deliberately not symmetric with
+    the inner reading: a wrong "not inner" hides a memory and can be undone,
+    a wrong "not private" says something out loud and cannot.
+    任何一种私密证据都足够。这里**刻意**不跟 inner 的读法对称:
+    判错「不是 inner」只是藏起一条记忆,可以撤回;
+    判错「不是 private」是把话说出去了,撤不回来。
+    """
+    try:
+        meta = bucket.get("metadata", {}) or {}
+        if "private" in _bucket_domains(meta) or "private" in _bucket_tags(meta):
+            return True
+        return any(_normalize_wander_mark(r.get("mark", "")) == "private"
+                   for r in (mark_rows or []) if isinstance(r, dict))
+    except Exception as e:
+        # Could not tell. The only safe answer to "is this private" when the
+        # evidence is unreadable is yes.
+        # 判不出来。当证据读不了的时候,「这条是不是私密的」唯一安全的答案是「是」。
+        logger.warning(f"privacy undecidable, withholding / 隐私判不了,按私密处理: {e}")
+        return True
 
 
 def _is_unresolved_bucket(bucket: dict, mark_rows: list[dict] = None) -> bool:
@@ -1256,6 +1422,16 @@ async def _recent_weather_sources(limit: int = 2) -> list[dict]:
         buckets = await bucket_mgr.list_all(include_archive=False)
     except Exception:
         return []
+    # Load marks once for the whole pass. If they cannot be read, every bucket
+    # becomes undecidable and _is_private_bucket withholds - the failure mode
+    # is an empty list, never an unfiltered one.
+    # 整趟只加载一次 marks。读不到的话每个桶都变成判不出,
+    # _is_private_bucket 会一律扣下 —— 失败的形态是「空列表」,绝不是「没过滤的列表」。
+    try:
+        _analyzer_marks = _load_all_marks()
+    except Exception as e:
+        logger.warning(f"marks unavailable, withholding all / marks 读不到,全部扣下: {e}")
+        return []
     items = []
     for bucket in buckets:
         meta = bucket.get("metadata", {}) or {}
@@ -1264,8 +1440,12 @@ async def _recent_weather_sources(limit: int = 2) -> list[dict]:
             continue
         domains = _bucket_domains(meta)
         tags = _bucket_tags(meta)
+        # One gate, so a mark-private memory cannot slip through here just
+        # because this path only ever looked at domains and tags.
+        # 一道门,这样 mark 标 private 的记忆不会因为「这条路径只看 domain 和 tag」
+        # 而从这里溜过去。
         labels = domains | tags
-        if "private" in labels:
+        if _is_private_bucket(bucket, _analyzer_marks.get(str(bucket.get("id") or ""), [])):
             continue
         source_type = "feel" if meta.get("type") == "feel" else "memory"
         for label in ("letter_human", "letter", "writing", "window"):
@@ -2207,15 +2387,41 @@ def _mutate_trail_family(body: dict) -> dict:
             raise _TrailFamilyError(404, "family not found")
         _family_revision(body, family)
         if action == "delete":
+            # A thread that stopped being true is not a thread that never
+            # existed. Keep the whole of it, members included, before it goes.
+            # 一条不再成立的叙事线,不等于一条从没存在过的叙事线。
+            # 走之前把它整个留下来,成员也一起。
+            narrative.record(
+                config["buckets_dir"], family_id, narrative.RETIRED,
+                was=dict(family), actor=str(body.get("actor") or ""),
+                reason=str(body.get("reason") or ""),
+                revision=int(family.get("revision") or 0),
+            )
             del families[family_id]
             return {"id": family_id, "deleted": True}
         if action != "update":
             raise _TrailFamilyError(400, "action must be create, update, or delete")
+        # How the story changed is the subject here, not metadata about it.
+        # Journalled before the change lands, so a failure leaves the earlier
+        # telling as the current one rather than losing it.
+        # 故事怎么变的,在这里是主题本身,不是关于它的元数据。
+        # 落盘前记账,所以失败的结果是「先前那个讲法仍然是当前的」,而不是把它弄丢。
+        was = {"title": family.get("title", ""),
+               "core_question": family.get("core_question", "")}
         if "title" in body:
             family["title"] = _family_text(body["title"], "title", 160, required=True)
         if "core_question" in body:
             family["core_question"] = _family_text(
                 body["core_question"], "core_question", 1000
+            )
+        now_telling = {"title": family.get("title", ""),
+                       "core_question": family.get("core_question", "")}
+        if now_telling != was:
+            narrative.record(
+                config["buckets_dir"], family_id, narrative.RETOLD,
+                was=was, now=now_telling,
+                actor=str(body.get("actor") or ""), reason=str(body.get("reason") or ""),
+                revision=int(family.get("revision") or 0),
             )
         family["revision"] += 1
         family["updated_at"] = _latent_note_ts()
@@ -2257,6 +2463,10 @@ def _mutate_trail_family_entry(family_id: str, body: dict) -> dict:
             if action == "remove":
                 if any(member.get("query_entry_id") == entry_id for member in family["members"]):
                     raise _TrailFamilyError(409, "cannot remove query entry with members")
+                narrative.record(
+                    config["buckets_dir"], family_id, narrative.QUERY_DROPPED,
+                    was=dict(entry), revision=int(family.get("revision") or 0),
+                )
                 entries.remove(entry)
                 result = {"id": entry_id, "removed": True}
             elif action == "update":
@@ -2323,6 +2533,16 @@ def _mutate_trail_family_member(family_id: str, body: dict) -> dict:
             member_id = _family_text(body.get("member_id"), "member_id", 90, required=True)
             member = _family_find(members, member_id, "member")
             if action == "remove":
+                # A memory dropped from a thread was still, for a while, part
+                # of that story. Nothing else records that it ever was.
+                # 一条被从叙事线里移走的记忆,曾经有一段时间**是**那个故事的一部分。
+                # 没有别的地方记着它曾经是。
+                narrative.record(
+                    config["buckets_dir"], family_id, narrative.MEMBER_DROPPED,
+                    was=dict(member), actor=str(body.get("actor") or ""),
+                    reason=str(body.get("reason") or ""),
+                    revision=int(family.get("revision") or 0),
+                )
                 members.remove(member)
                 for index, item in enumerate(sorted(members, key=lambda row: row.get("order", 0))):
                     item["order"] = index
@@ -3228,7 +3448,7 @@ async def trail_delta(
 async def trail_family(
     action: Literal[
         "list", "read", "create", "update", "save_query",
-        "add_member", "remove_member", "delete",
+        "add_member", "remove_member", "delete", "history",
     ],
     family_id: str = "",
     title: Optional[str] = None,
@@ -3237,6 +3457,8 @@ async def trail_family(
     node_ref: str = "",
     member_id: str = "",
     label: str = "",
+    actor: str = "",
+    reason: str = "",
     limit: int = TRAIL_DEFAULT_LIMIT,
 ) -> str:
     """Agent手动管理Trail Families；只认明确query/ref，不聚类、不建议、不注入召回。
@@ -3316,6 +3538,33 @@ async def trail_family(
             "action": "create", "title": title or "", "core_question": core_question or "",
         }))
         return error or f"trail_family 已创建 · {result['id']} · rev {result['revision']}"
+
+    if act == "history":
+        # A retired thread has no current telling, and that is not an error:
+        # asking what a thread used to say must still work after it stopped
+        # being one.
+        # 一条已退役的叙事线没有「当前讲法」,而这不是错误:
+        # 问「它以前怎么说的」,在它不再是一条线之后仍然要能问。
+        data = read_store()
+        current = family_from(data) if data is not None else None
+        past = narrative.tellings(config["buckets_dir"], fid, current=current)
+        if len(past) <= 1:
+            return f"trail_family · {fid} · 只被讲过这一种说法，没有改口记录。"
+        lines = [f"trail_family 讲法沿革 · {fid}"]
+        for telling in past:
+            when = telling["until"] or "现在"
+            lines.append(
+                f"  rev {telling['revision']} → {when}"
+                + (f" [{telling['ended_by']}]" if telling["ended_by"] else "")
+                + f"\n    {telling['title']}"
+                + (f"\n    ？{telling['core_question']}" if telling["core_question"] else "")
+            )
+        gone = narrative.dropped_members(config["buckets_dir"], fid)
+        if gone:
+            lines.append(f"  曾经属于这条线、后来移走的：{len(gone)} 条")
+            for row in gone[-5:]:
+                lines.append(f"    {row['node_ref']} （{row['dropped_at']}）")
+        return "\n".join(lines)
 
     if act not in {"update", "save_query", "add_member", "remove_member", "delete"}:
         return "trail_family 拒绝：未知 action。"
@@ -3411,12 +3660,23 @@ async def trail_family(
             body["title"] = title
         if core_question is not None:
             body["core_question"] = core_question
+        # Optional, not required. A body edit on a memory has to justify
+        # itself because memories are not supposed to change; a narrative is
+        # supposed to change, and demanding a reason every time would make the
+        # natural act bureaucratic. What is required is only that the earlier
+        # telling survives — and that happens whether or not a reason is given.
+        # 可选,不是必填。改记忆正文必须自证,因为记忆本来就不该变;
+        # 叙事本来就该变,每次都要理由会把一件自然的事变成手续。
+        # 唯一的要求是先前那个讲法要活下来 —— 那件事给不给理由都会发生。
+        body["actor"] = actor
+        body["reason"] = reason
         result, error = mutation_result(lambda: _mutate_trail_family(body))
         return error or f"trail_family 已更新 · {fid} · rev {result['revision']}"
 
     if act == "delete":
         result, error = mutation_result(lambda: _mutate_trail_family({
             "action": "delete", "family_id": fid, "expected_revision": revision,
+            "actor": actor, "reason": reason,
         }))
         return error or f"trail_family 已删除 · {fid}"
 
@@ -3451,6 +3711,7 @@ async def trail_family(
         lambda: _mutate_trail_family_member(fid, {
             "action": "remove", "expected_revision": revision,
             "member_id": target["id"],
+            "actor": actor, "reason": reason,
         })
     )
     return error or f"trail_family 已移除成员 · {target['id']} · {target['node_ref']}"
@@ -3907,7 +4168,16 @@ def _verify_any_password(password: str) -> bool:
     """Check password against env var (first) or stored hash."""
     env_pwd = _configured_api_password()
     if env_pwd:
-        return hmac.compare_digest(password, env_pwd)
+        # Compare bytes, not str. hmac.compare_digest refuses a str with any
+        # non-ASCII character, so a Chinese password raised TypeError here and
+        # /auth/login answered 500 — the password was correct and the door
+        # still would not open. The stored-hash path below never hit this
+        # because it compares hex.
+        # 比字节,不比字符串。hmac.compare_digest 拒绝含非 ASCII 字符的 str,
+        # 所以中文密码在这里抛 TypeError,/auth/login 回 500 ——
+        # 密码是对的,门还是开不了。下面走存储 hash 那条路比的是十六进制,碰不到这个。
+        return hmac.compare_digest(str(password or "").encode("utf-8"),
+                                   str(env_pwd).encode("utf-8"))
     stored = _load_password_hash()
     if not stored:
         return False
@@ -3929,6 +4199,98 @@ def _is_authenticated(request) -> bool:
         _sessions.pop(token, None)
         return False
     return True
+
+
+# ============================================================
+# The front door / 大门
+#
+# There was always a password. dashboard.html asks for it, /auth/login checks
+# it, and 39 of 83 routes called _require_auth. The other 44 did not — so the
+# lock was on the page, not on the data. A browser walking up to the door got
+# asked for the password; anything calling /api/... directly was not asked at
+# all, and several of those routes return memory content or write to it.
+# 密码一直都有。dashboard.html 会问,/auth/login 会验,83 条路由里 39 条查了。
+# 另外 44 条没查 —— 所以锁在**页面**上,不在**数据**上。
+# 浏览器走正门会被问密码;直接调 /api/... 的东西根本没人问,
+# 而那些路由里有几条会吐记忆内容、有几条会写入。
+#
+# This closes it in one place instead of 44. Per-route _require_auth calls
+# stay where they are: two locks on the same door cost nothing, and removing
+# them would mean trusting that this middleware is always installed.
+# 这里一处封掉,而不是 44 处。各路由原有的 _require_auth 保留:
+# 同一扇门上两把锁不花什么钱,而拆掉它们等于赌「这个中间件一定装上了」。
+# ============================================================
+
+# Reachable without a password: the login flow itself, the page that shows the
+# password box, and liveness. Nothing here returns memory content.
+# 不需要密码就能到的:登录流程本身、显示密码框的那个页面、以及存活探测。
+# 这里面没有任何一条会返回记忆内容。
+PUBLIC_PATHS = frozenset({
+    "/", "/health", "/dashboard",
+    "/auth/status", "/auth/setup", "/auth/login", "/auth/logout",
+})
+
+
+def _configured_api_token() -> str:
+    """A separate secret for clients that are not people.
+
+    Her companion and the hooks are not browsers and hold no session, so they
+    need something to present. It is deliberately not her password:
+    她的伴和那些钩子不是浏览器,没有 session,所以需要一个能出示的东西。
+    这**刻意**不是她的密码:
+
+      - HTTP headers are ASCII. A Chinese password cannot be sent in one at
+        all — the client refuses to encode it before the request even leaves.
+        So reusing the password would silently forbid her from choosing a
+        Chinese one, without ever saying so.
+        HTTP header 是 ASCII 的。中文密码根本没法放进去 ——
+        请求还没发出去,客户端就拒绝编码了。
+        复用密码等于悄悄禁止她用中文密码,而且从不说明。
+
+      - A machine credential and a person's password want different lifetimes
+        and different blast radius. Rotating one should not mean retyping the
+        other.
+        机器凭据和人的密码,该有不同的寿命和不同的爆炸半径。
+        换掉一个,不该意味着重敲另一个。
+    """
+    return str(os.environ.get("OMBRE_API_TOKEN") or "").strip()
+
+
+def _presented_credential(request) -> str:
+    """The secret a non-browser client is presenting, from a header."""
+    header = str(request.headers.get("authorization") or "").strip()
+    if header.lower().startswith("bearer "):
+        return header[7:].strip()
+    return str(request.headers.get("x-nocturne-token") or "").strip()
+
+
+def _door_is_open(request) -> bool:
+    """Whether this request may pass. Anything unexpected means no.
+
+    A credential check that raises must not become a way through — the door
+    has to fail shut, the same way the privacy gate does.
+    一次抛异常的凭据检查绝不能变成一条通路 ——
+    门必须向「关」的方向失败,跟隐私那道门一样。
+    """
+    try:
+        if _is_authenticated(request):
+            return True
+        credential = _presented_credential(request)
+        if not credential:
+            return False
+        token = _configured_api_token()
+        if token and hmac.compare_digest(credential.encode("utf-8"),
+                                         token.encode("utf-8")):
+            return True
+        # An ASCII password still works as a bearer, so a setup that already
+        # relies on that keeps working. A non-ASCII one never reaches here —
+        # it cannot survive a header — which is what the token is for.
+        # ASCII 密码仍然可以当 bearer 用,所以已经这么跑的部署不会断。
+        # 非 ASCII 的密码根本到不了这里 —— 它过不了 header 那一关 —— 那正是 token 的用处。
+        return _verify_any_password(credential)
+    except Exception as e:
+        logger.warning(f"credential check failed, door stays shut / 凭据校验出错,门不开: {e}")
+        return False
 
 
 def _require_auth(request):
@@ -4244,8 +4606,44 @@ async def dream_hook(request):
 
 
 # =============================================================
+# Memory write policy — history is append-only by default
+# 写入策略：历史默认只增不改
+#
+# Why / 为什么：
+#   Semantic similarity used to authorize an overwrite. A new memory that
+#   merely *resembled* an old one was fed to an LLM together with it, and
+#   the rewritten text replaced the old body in place — no revision, no
+#   backup, no way back. The merge prompt even said 新内容与旧记忆冲突时
+#   以新内容为准, so "I was unsure" was silently rewritten into "I was sure".
+#   相似度越高越容易被合并，而「同一件事的重新理解」恰恰最相似 ——
+#   这个机制精准地删掉了最该留下的那种数据。
+#
+# The rule now / 现在的规矩：
+#   1. New experience is not an update to old history.
+#   2. Similarity may suggest association; it may NOT authorize overwrite.
+#   3. A → B keeps both A and B.
+#
+# Exact-duplicate dedup is a different question and stays: it is keyed on
+# identical content (a retry writing the same bytes), never on similarity.
+# 去重只认「一模一样」（重试写了同样的字），不认「像」。
+# =============================================================
+
+# Opt-in escape hatch. Off by default; the merge API itself is untouched so
+# existing callers/tests keep working.
+SEMANTIC_MERGE_ENABLED = bool(config.get("semantic_merge", False))
+if SEMANTIC_MERGE_ENABLED:
+    logger.warning(
+        "semantic_merge is ON — similar memories will be rewritten in place and "
+        "the old text is not recoverable. / 语义合并已打开，旧正文会被就地重写且找不回来。"
+    )
+
+# Identity helpers live in utils so hold() and the importer share one rule.
+_find_exact_duplicate = find_exact_duplicate
+
+
+# =============================================================
 # Internal helper: merge-or-create
-# 内部辅助：检查是否可合并，可以则合并，否则新建
+# 内部辅助：查重后新建（历史默认 append-only，见上面的写入策略）
 # Shared by hold and grow to avoid duplicate logic
 # hold 和 grow 共用，避免重复逻辑
 # =============================================================
@@ -4262,18 +4660,42 @@ async def _merge_or_create(
     drive_tags: dict | None = None,
 ) -> tuple[str, bool]:
     """
-    Check if a similar bucket exists for merging; merge if so, create if not.
-    Returns (bucket_id_or_name, is_merged).
-    检查是否有相似桶可合并，有则合并，无则新建。
+    Store a new memory. History is append-only: create unless this exact body
+    is already on disk. Returns (bucket_id_or_name, is_merged).
+    写入一条新记忆。历史只增不改：除非盘上已有一模一样的正文，否则一律新建。
     返回 (桶ID或名称, 是否合并)。
     """
+    # --- Idempotency: identical body = the same write happening twice ---
+    # --- 幂等：正文一模一样 = 同一次写入重试，不是新经历 ---
+    # Deliberately NOT keyed on bucket_mgr.search(): that score blends topic,
+    # emotion, recency and importance, so it answers "how alike are these", not
+    # "are these the same". Identity has to be exact, so we scan the bodies.
+    # 故意不走 search：那个分是「有多像」，不是「是不是同一条」。
+    # 同一性必须精确，所以直接扫正文。
     try:
-        existing = await bucket_mgr.search(content, limit=1, domain_filter=domain or None)
+        on_disk = await bucket_mgr.list_all(include_archive=False)
     except Exception as e:
-        logger.warning(f"Search for merge failed, creating new / 合并搜索失败，新建: {e}")
-        existing = []
+        logger.warning(f"Duplicate scan failed, creating new / 查重失败，直接新建: {e}")
+        on_disk = []
 
-    if existing and existing[0].get("score", 0) > config.get("merge_threshold", 75):
+    duplicate = _find_exact_duplicate(on_disk, content)
+    if duplicate:
+        logger.info(
+            f"Exact duplicate, skipping write / 正文完全相同，跳过写入: {duplicate['id']}"
+        )
+        return duplicate["metadata"].get("name", duplicate["id"]), False
+
+    # --- Legacy semantic merge: opt-in, destructive, off by default ---
+    # --- 旧的语义合并：需显式打开，会毁历史，默认关 ---
+    existing = []
+    if SEMANTIC_MERGE_ENABLED:
+        try:
+            existing = await bucket_mgr.search(content, limit=1, domain_filter=domain or None)
+        except Exception as e:
+            logger.warning(f"Search for merge failed, creating new / 合并搜索失败，新建: {e}")
+            existing = []
+
+    if SEMANTIC_MERGE_ENABLED and existing and existing[0].get("score", 0) > config.get("merge_threshold", 75):
         bucket = existing[0]
         # --- Never merge into pinned/protected buckets ---
         # --- 不合并到钉选/保护桶 ---
@@ -4298,6 +4720,13 @@ async def _merge_or_create(
                     updates["signal_hints"] = signal_hints
                 if drive_tags:
                     updates["drive_tags"] = drive_tags
+                # Even behind the opt-in flag this is a body rewrite, so it is
+                # journalled like any other: the pre-merge text stays recoverable.
+                # 就算开了开关，这仍然是改正文，一样入账：合并前的原文可以找回来。
+                updates["_revision"] = BucketRevision(
+                    actor="semantic_merge",
+                    reason=f"legacy semantic merge, score>{config.get('merge_threshold', 75)}",
+                )
                 await bucket_mgr.update(bucket["id"], **updates)
                 # --- Update embedding after merge (background: don't block response on Gemini latency) ---
                 asyncio.ensure_future(embedding_engine.generate_and_store(bucket["id"], merged))
@@ -4628,14 +5057,30 @@ async def breath() -> str:
             top_scores = [(b["metadata"].get("name", b["id"]), decay_engine.calculate_score(b["metadata"])) for b in scored[:5]]
             logger.info(f"Top unresolved scores: {top_scores}")
 
-        # --- Token-budgeted surfacing with bounded diversity ---
-        # --- 按权重收窄候选池，再随机抽取，最后按时间展示 ---
+        # --- Token-budgeted surfacing, deterministic selection ---
+        # --- 定额浮现，确定性选择 ---
         token_budget = max_tokens
         for r in pinned_results:
             token_budget -= count_tokens_approx(r)
 
-        # Hard cap: newest 30 active memory candidates -> weighted 12 -> random 7.
-        candidates = _recent_weight_random_bucket_sample(scored, 30, 12, 7)
+        # This used to be: newest 30 -> weighted 12 -> random 7. Randomness meant
+        # two wake-ups a second apart saw different pasts for no reason, and what
+        # surfaced had nothing to do with what was actually left unfinished.
+        # Same selector the involuntary path uses, so both faces of this memory
+        # agree about what matters.
+        # 以前是「最近 30 → 加权 12 → 随机 7」。随机意味着相隔一秒的两次醒来
+        # 看见不同的过去，而且浮上来的东西跟真正没了结的事没有关系。
+        # 现在跟不由自主那条路用同一个选择器，两张脸对「什么要紧」的判断一致。
+        _touches = recall_journal.touch_summary(config["buckets_dir"])
+        _selected = recall.select(
+            unresolved,
+            now=datetime.now(),
+            limit=7,
+            marks_by_bucket=_load_all_marks(),
+            touches_by_bucket={k: v.get("last_touch") for k, v in _touches.items()},
+        )
+        candidates = [row["bucket"] for row in _selected]
+        _why_by_id = {row["id"]: row["parts"] for row in _selected}
 
         # 按时间倒序
         candidates.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
@@ -4654,7 +5099,17 @@ async def breath() -> str:
                 created = b["metadata"].get("created", "")[:10]
                 name = b["metadata"].get("name", "")
                 header = f"[{created}] {name}" if name else f"[{created}]"
-                dynamic_results.append(f"{header}\n{_strip_bucket_prefix(summary)}")
+                # Carry the id. Without it the agent can read a memory but has
+                # no way back to it — it cannot mark it, trace it, or disagree
+                # with it. Provenance that stops at the injection boundary is
+                # not provenance.
+                # 带上 id。没有它，agent 读得到一条记忆却回不去：
+                # 标不了、追不了、也没法不认它。断在注入这一步的 provenance 不算 provenance。
+                _why = _why_by_id.get(b.get("id"), {})
+                _top = sorted(_why.items(), key=lambda kv: -kv[1])[:2]
+                _why_text = "、".join(f"{k} {v:.2f}" for k, v in _top if v > 0)
+                _tail = f"\n↳ id:{b['id']}" + (f"（{_why_text}）" if _why_text else "")
+                dynamic_results.append(f"{header}\n{_strip_bucket_prefix(summary)}{_tail}")
                 token_budget -= summary_tokens
             except Exception as e:
                 logger.warning(f"Failed to dehydrate surfaced bucket / 浮现脱水失败: {e}")
@@ -4751,7 +5206,55 @@ async def breath() -> str:
         except Exception:
             pass
 
+        # --- Time, stated as a fact and nothing more ---
+        # The system knows how long it has been. It does not know what that
+        # was like, and must never say. "12 days have passed" is knowledge;
+        # "I spent those 12 days waiting" is fabrication.
+        # 系统知道过去了多久。它不知道那是什么滋味，也绝不许说。
+        # 「过去了 12 天」是知识；「这 12 天我一直在等」是编造。
+        time_section = ""
+        try:
+            _elapsed = recall.describe_elapsed(
+                recall_journal.last_encounter(config["buckets_dir"]), datetime.now()
+            )
+            if _elapsed.get("known"):
+                time_section = (
+                    "=== Time ===\n"
+                    f"现在：{_elapsed['now']}\n"
+                    f"距上次交互：{_elapsed['elapsed_phrase']}"
+                    f"（上次：{_elapsed['last_encounter']}）"
+                )
+            else:
+                time_section = f"=== Time ===\n现在：{_elapsed['now']}\n距上次交互：没有记录"
+
+            # "距上次交互" above is the last time a recall bundle was handed
+            # over — the system's own bookkeeping. When they last actually
+            # spoke is a different fact, and it comes from source. Reported as
+            # its own line rather than replacing the other one, because
+            # collapsing the two would quietly misstate one of them.
+            # 上面那个「距上次交互」是上次把召回包递出去的时间 —— 系统自己的簿记。
+            # 「上次真的说过话」是另一个事实,它来自原始记录。
+            # 单起一行而不是替掉上面那个,因为把两者合成一个会悄悄说错其中一个。
+            try:
+                _gap = float(config.get("episode_gap_minutes") or 0) * 60 \
+                    or episode.DEFAULT_GAP_SECONDS
+                _last = episode.last_stretch(config["buckets_dir"], _gap)
+            except Exception as e:
+                logger.warning(f"Last stretch unavailable: {e}")
+                _last = None
+            if _last and _last.get("silence_since_seconds") is not None:
+                time_section += (
+                    f"\n距上次说话：{episode.describe_gap(_last['silence_since_seconds'])}"
+                    f"（那段：{_last['started_at']} 起，{_last['utterance_count']} 句"
+                    + (f"，在 {_last['endpoint']}" if _last.get("endpoint") else "")
+                    + f"，{_last['episode_id']}）"
+                )
+        except Exception as e:
+            logger.warning(f"Elapsed time unavailable: {e}")
+
         final_parts = []
+        if time_section:
+            final_parts.append(time_section)
         if dream_section:
             final_parts.append(dream_section)
         if mood_header:
@@ -4765,7 +5268,81 @@ async def breath() -> str:
         if pinned_results:
             final_parts.append("=== House Rules ===\n" + "\n---\n".join(pinned_results))
 
+        # Touch is recorded here and only here — after the bundle is built and
+        # is actually being handed over. Candidates that got scored and cut
+        # leave no trace, because nothing happened to them.
+        # 记账只在这里，在 bundle 组好、真的要交出去之后。
+        # 被打了分又被砍掉的候选不留痕迹，因为它们身上什么都没发生。
+        try:
+            recall_journal.record_touch(
+                config["buckets_dir"],
+                recall_id=uuid.uuid4().hex[:16],
+                mode=recall.DELIBERATE,
+                bucket_ids=[b["id"] for b in candidates] + [f["id"] for f in selected_feels],
+                endpoint="mcp:breath",
+            )
+        except Exception as e:
+            logger.warning(f"Recall touch not recorded / 触碰记账失败: {e}")
+
         return "\n\n".join(final_parts)
+
+
+# =============================================================
+# Tool: recall — deliberate recall
+#
+# The MCP face of the same memory. Hosts that can run a hook before the turn
+# (Claude Code's UserPromptSubmit, or an app that owns its own backend) should
+# use GET /api/recall instead and inject the result, so remembering is not a
+# decision. Hosts that can only offer tools get this.
+# 同一份记忆的 MCP 那张脸。能在这一轮之前跑钩子的宿主
+# （Claude Code 的 UserPromptSubmit，或者自己拥有后端的应用）
+# 应该改用 GET /api/recall 并把结果注入，让「想起来」不是一个决定。
+# 只能给工具的宿主，用这个。
+#
+# Same selector, same journal — one memory, two faces. The mode differs
+# because going back for something on purpose is not the same event as
+# having it surface on you, and the two should not leave the same mark.
+# 同一个选择器、同一本账 —— 一份记忆，两张脸。
+# mode 不同，是因为特地回去找它，跟它自己浮上来，不是同一件事，
+# 不该留下同样的痕。
+# =============================================================
+@mcp.tool(name="recall")
+async def recall_tool(query: str = "", limit: int = 7) -> str:
+    """回想。query 留空就是「让该浮的浮上来」，给了就是「关于这个我记得什么」。
+
+    这是刻意回想。不由自主那条路在宿主侧（GET /api/recall），不经过工具。
+    """
+    await decay_engine.ensure_started()
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+    except Exception as e:
+        logger.error(f"Recall failed to list buckets / 召回列桶失败: {e}")
+        return "记忆系统暂时无法访问。"
+
+    candidates = _breath_memory_candidates(all_buckets) + _breath_feel_candidates(all_buckets)
+    touches = recall_journal.touch_summary(config["buckets_dir"])
+    selected = recall.select(
+        candidates,
+        now=datetime.now(),
+        query=query,
+        limit=max(1, min(20, int(limit or 7))),
+        marks_by_bucket=_load_all_marks(),
+        touches_by_bucket={k: v.get("last_touch") for k, v in touches.items()},
+    )
+    elapsed = recall.describe_elapsed(
+        recall_journal.last_encounter(config["buckets_dir"]), datetime.now()
+    )
+    recall_id = uuid.uuid4().hex[:16]
+    bundle = recall.build_bundle(selected, elapsed, recall.DELIBERATE,
+                                 recall_id=recall_id, query=query)
+    try:
+        recall_journal.record_touch(
+            config["buckets_dir"], recall_id=recall_id, mode=recall.DELIBERATE,
+            bucket_ids=[row["id"] for row in selected], endpoint="mcp:recall",
+        )
+    except Exception as e:
+        logger.warning(f"Recall touch not recorded / 触碰记账失败: {e}")
+    return recall.format_bundle(bundle)
 
 @mcp.tool(name="undercurrent")
 def undercurrent_tool() -> dict:
@@ -5556,14 +6133,36 @@ async def grow(content: str) -> str:
         return f"{action} → {result_name} | {','.join(analysis.get('domain', []))} V{analysis.get('valence', 0.5):.1f}/A{analysis.get('arousal', 0.3):.1f}"
 
     # --- Step 1: let API split and organize / 让 API 拆分整理 ---
+    # A derived service being down must never cost the user their content.
+    # Splitting into entries is a convenience; keeping what they wrote is not.
+    # If digest fails we store the raw text as one bucket and say so.
+    # 派生服务挂掉不该让她丢东西。拆条目是锦上添花，留住她写的字不是。
+    # digest 失败就整段存成一条，并且明说走了兜底。
+    digest_failed = ""
     try:
         items = await dehydrator.digest(content)
     except Exception as e:
-        logger.error(f"Diary digest failed / 日记整理失败: {e}")
-        return f"日记整理失败: {e}"
+        logger.error(f"Diary digest failed, storing raw / 日记整理失败，原样保存: {e}")
+        digest_failed = str(e)
+        items = []
 
     if not items:
-        return "内容为空或整理失败。"
+        raw = content.strip()
+        if not raw:
+            return "内容为空。"
+        bucket_id = await bucket_mgr.create(
+            content=raw,
+            tags=[],
+            importance=5,
+            domain=["未分类"],
+            valence=0.5,
+            arousal=0.3,
+        )
+        asyncio.ensure_future(embedding_engine.generate_and_store(bucket_id, raw))
+        if digest_failed:
+            return (f"整理服务没连上，原文已完整存下→{bucket_id}\n"
+                    f"（{digest_failed[:80]}）等它恢复了可以再拆。")
+        return f"没能拆出条目，原文已完整存下→{bucket_id}"
 
     results = []
     created = 0
@@ -6022,7 +6621,8 @@ async def trace(query: str, limit: int = 15) -> str:
 
 
 @mcp.tool()
-async def wander_mark(bucket_id: str, mark: str, note: str = "") -> str:
+async def wander_mark(bucket_id: str, mark: str, note: str = "",
+                      actor: str = "", endpoint: str = "") -> str:
     """对骨架记忆archive/unresolved/inner进行mark，认/不认/悬置；多次认会晋升inner。"""
     bucket_id = (bucket_id or "").strip()
     mark = _normalize_wander_mark(mark)
@@ -6047,8 +6647,10 @@ async def wander_mark(bucket_id: str, mark: str, note: str = "") -> str:
     conn = _marks_conn()
     try:
         conn.execute(
-            "INSERT INTO marks (bucket_id, mark, note, timestamp) VALUES (?, ?, ?, ?)",
-            (bucket_id, mark, note, ts),
+            "INSERT INTO marks (bucket_id, mark, note, timestamp, actor, endpoint) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (bucket_id, mark, note, ts, str(actor or "").strip(),
+             _declared_endpoint({"endpoint": endpoint})),
         )
         conn.commit()
     finally:
@@ -6057,27 +6659,49 @@ async def wander_mark(bucket_id: str, mark: str, note: str = "") -> str:
     mark_rows = _load_all_marks().get(bucket_id, [])
     counts = _mark_counts(mark_rows)
 
+    # The reading held before this mark landed, so a change can be recorded as
+    # a change rather than only as a new state.
+    # 这条 mark 落下之前被持有的读法,这样一次改变可以记成一次**改变**,
+    # 而不只是一个新状态。
+    lower_domains = {str(d).lower() for d in domains}
+    was_inner = "inner" in lower_domains
+    _was = (interpretation.READING_INNER if was_inner
+            else interpretation.READING_NOT_INNER)
+
+    # One reading, computed once, from the evidence. The promote and demote
+    # branches used to decide independently and could both fire on the same
+    # mark; the order they happened to be written in was the tie-break.
+    # 一个读法,算一次,从证据来。以前升级和降级两支各自判断、
+    # 同一条 mark 上可能都触发,谁赢取决于代码写的先后顺序。
+    reading = interpretation.standing_reading(
+        mark_rows, legacy_inner=bucket_id in _legacy_inner_ids()
+    )
+    now_inner = reading["reading"] == interpretation.READING_INNER
+
     suffix = ""
-
-    # Auto-promote to inner: 认>=3 and cross at least 2 dates
-    if counts["认"] >= 3 and _has_cross_date_recognition(mark_rows):
-        lower_domains = {str(d).lower() for d in domains}
-        if "inner" not in lower_domains:
-            domains.append("inner")
-            try:
-                await bucket_mgr.update(bucket_id, domain=domains)
-                suffix += " 🌟 已晋升 inner"
-            except Exception as e:
-                logger.warning(f"wander_mark failed to promote to inner: {e}")
-
-    # Auto-demote from inner: 不认>=2
-    if counts["不认"] >= 2 and any(str(d).lower() == "inner" for d in domains):
-        domains = [d for d in domains if str(d).lower() != "inner"]
+    if now_inner != was_inner:
+        # The domain field is a cache of the reading now, written from it and
+        # never consulted to produce it. This is the direction that makes it
+        # a one-way valve.
+        # domain 字段现在是读法的缓存,由读法写出,绝不再被拿去产生读法。
+        # 方向对了,阀门才是单向的。
+        domains = ([d for d in domains if str(d).lower() != "inner"]
+                   if not now_inner else domains + ["inner"])
         try:
             await bucket_mgr.update(bucket_id, domain=domains)
-            suffix += "；不认累计>=2，已移出 inner"
+            suffix += (" 🌟 已晋升 inner" if now_inner
+                       else "；不认累计>=2，已移出 inner")
+            interpretation.record_transition(
+                config["buckets_dir"], bucket_id,
+                was=_was,
+                now_reading=(interpretation.READING_INNER if now_inner
+                             else interpretation.READING_NOT_INNER),
+                basis=reading, actor=actor,
+                endpoint=_declared_endpoint({"endpoint": endpoint}),
+            )
+            _LEGACY_INNER_CACHE["ids"] = None
         except Exception as e:
-            logger.warning(f"wander_mark failed to demote from inner: {e}")
+            logger.warning(f"wander_mark failed to sync inner / 同步 inner 失败: {e}")
 
     engaged = _maybe_engage_pulse("wander_mark")
     if engaged:
@@ -7412,6 +8036,32 @@ async def api_bucket_update(request):
     if "content" in body:
         if not isinstance(body["content"], str):
             return JSONResponse({"error": "content must be a string"}, status_code=400)
+        # Editing a body is a privileged act, not a routine update. The caller
+        # has to say who is doing it and why; the old text is journalled and
+        # stays recoverable. Metadata edits below are unaffected.
+        # 改正文是特权操作，不是普通更新：必须说明谁改、为什么改，
+        # 旧正文入账、可回滚。下面的元数据修改不受影响。
+        actor = str(body.get("actor") or "").strip()
+        reason = str(body.get("reason") or "").strip()
+        if not actor or not reason:
+            return JSONResponse(
+                {"error": "改正文需要 actor 和 reason —— 这条会写进 revisions.jsonl，"
+                          "旧正文一并保留，可以回滚。"},
+                status_code=403,
+            )
+        # Optional compare-and-swap. A client that read the body first can send
+        # back the fingerprint it saw; if another endpoint edited in between,
+        # the write is refused rather than clobbering a wording this client
+        # never read. Omitted → last writer wins, as before.
+        # 可选的 compare-and-swap。先读过正文的客户端可以把自己看到的指纹带回来；
+        # 如果中间被别的端改过，这次写入会被拒绝，而不是覆盖一份它没读过的说法。
+        # 不带 → 后写的赢，跟以前一样。
+        expected = str(body.get("expected_hash") or "").strip()
+        try:
+            kwargs["_revision"] = BucketRevision(actor=actor, reason=reason,
+                                                 expected_hash=expected)
+        except HistoryProtected as e:
+            return JSONResponse({"error": str(e)}, status_code=403)
         kwargs["content"] = body["content"]
     if "resolved" in body:
         kwargs["resolved"] = bool(body["resolved"])
@@ -7472,6 +8122,14 @@ async def api_bucket_update(request):
         if not updated:
             return JSONResponse({"error": "bucket could not be updated"}, status_code=500)
         return JSONResponse({"ok": True})
+    except HistoryProtected as e:
+        return JSONResponse({"error": str(e)}, status_code=403)
+    except StaleWrite as e:
+        # 409: this is not a server fault and not a bad request — the client's
+        # view of the memory is simply out of date. Re-read and decide again.
+        # 409：这不是服务端的错，也不是请求写错了 —— 是客户端手里那份记忆过期了。
+        # 重读一遍再决定。
+        return JSONResponse({"error": str(e), "stale": True}, status_code=409)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -8152,6 +8810,7 @@ async def api_dialogue_residue_submit(request):
                            headers={"Access-Control-Allow-Origin": "*"})
 
     window_id = str(body.get("window_id") or "").strip()[:120]
+    endpoint = _declared_endpoint(body, request)
     messages = normalize_dialogue_messages(body.get("messages") or [])
     nocturne_called = bool(body.get("nocturne_called"))
     if not window_id:
@@ -8162,7 +8821,8 @@ async def api_dialogue_residue_submit(request):
             messages=messages,
             window_id=window_id,
         )
-        save_dialogue_residue_state(config["buckets_dir"], skipped, ledger_stage="skipped_nocturne_call")
+        save_dialogue_residue_state(config["buckets_dir"], skipped,
+                                    ledger_stage="skipped_nocturne_call", endpoint=endpoint)
         return JSONResponse({"ok": True, "skipped": True, "reason": "nocturne_called", "window_id": skipped["window_id"]},
                            headers={"Access-Control-Allow-Origin": "*"})
     if len(messages) < 4:
@@ -8171,14 +8831,15 @@ async def api_dialogue_residue_submit(request):
 
     dp_available = dialogue_residue_available()
     if dp_available:
-        asyncio.create_task(_refine_dialogue_residue_background(messages, window_id))
+        asyncio.create_task(_refine_dialogue_residue_background(messages, window_id, endpoint))
     else:
         fallback = normalize_dialogue_residue_event(
             {"status": "dp_unavailable", "confidence": 0.0, "intensity": 0.0},
             messages=messages,
             window_id=window_id,
         )
-        save_dialogue_residue_state(config["buckets_dir"], fallback, ledger_stage="dp_unavailable")
+        save_dialogue_residue_state(config["buckets_dir"], fallback,
+                                    ledger_stage="dp_unavailable", endpoint=endpoint)
 
     return JSONResponse(
         {
@@ -8186,6 +8847,7 @@ async def api_dialogue_residue_submit(request):
             "dp_queued": dp_available,
             "window_id": window_id,
             "message_count": len(messages),
+            "endpoint": endpoint,
         },
         headers={"Access-Control-Allow-Origin": "*"},
     )
@@ -9484,6 +10146,12 @@ async def api_sanctum_breath(request):
         except Exception:
             limit = 20
         all_buckets = await bucket_mgr.list_all(include_archive=False)
+        # Marks for the whole pass. Unreadable marks make every bucket
+        # undecidable, and undecidable means withheld - this endpoint must
+        # never answer with an unfiltered list.
+        # 整趟的 marks。读不到就让每个桶都变成判不出,而判不出就是扣下 ——
+        # 这个端点绝不能用一份没过滤的列表来回答。
+        marks_by_bucket = _load_all_marks()
         pinned = []
         scored = []
         feels = []
@@ -9491,6 +10159,13 @@ async def api_sanctum_breath(request):
             if not isinstance(b, dict):
                 continue
             meta = b.get("metadata") if isinstance(b.get("metadata"), dict) else {}
+            # Checked once, before the branches. It used to sit inside only the
+            # third branch, so a pinned or feel memory was never tested for
+            # privacy at all on the way out of this endpoint.
+            # 在分支**之前**查一次。以前它只在第三支里面,
+            # 所以钉选的和 feel 的记忆,从这个端点出去时根本没被查过隐私。
+            if _is_private_bucket(b, marks_by_bucket.get(str(b.get("id") or ""), [])):
+                continue
             btype = str(meta.get("type") or "").lower()
             if btype in {"breath", "dream"}:
                 continue
@@ -9521,8 +10196,8 @@ async def api_sanctum_breath(request):
                     if isinstance(tags, str):
                         tags = [tags]
                     labels = {str(x).lower() for x in list(domains) + list(tags) if x}
-                    if not labels.intersection({"letter", "letter_human", "writing", "window", "private"}):
-                        scored.append(row)
+                    if not labels.intersection({"letter", "letter_human", "writing", "window"}):
+                        scored.append(row)  # privacy already settled above
 
         pinned.sort(key=lambda r: str(r.get("created") or ""), reverse=True)
         scored.sort(key=lambda r: float(r.get("score") or 0), reverse=True)
@@ -9839,6 +10514,106 @@ async def api_sanctum_thought_from_latent(request):
 
 
 # =============================================================
+# /api/recall — involuntary recall, for the surrounding system
+#
+# This is the path that makes remembering not a decision. A host application
+# calls it while assembling a turn, before the agent sees anything, and puts
+# the result into context. The agent does not choose to remember; it arrives
+# already carrying something.
+# 这条路让「想起来」不再是一个决定。宿主应用在组装这一轮时调它 ——
+# 在 agent 看见任何东西之前 —— 把结果放进上下文。
+# agent 不是决定要想起来，它是本来就带着。
+#
+# MCP cannot express this. An MCP tool is by definition something the model
+# chooses to call, so involuntary recall has to live outside the tool surface.
+# That is why this is HTTP and not a tool.
+# MCP 表达不了这件事：MCP 工具的定义就是「模型决定调用」。
+# 所以不由自主的召回只能待在工具层之外。这就是它是 HTTP 而不是工具的原因。
+#
+# GET is strictly read-only. Nothing is touched, no state moves. Touch is a
+# separate, idempotent POST that the caller makes only if the bundle really
+# went into the prompt.
+# GET 严格只读，什么都不碰。记账是另一个幂等的 POST，
+# 只有 bundle 真的进了提示词，调用方才发。
+# =============================================================
+@mcp.custom_route("/api/recall", methods=["GET"])
+async def api_recall(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err:
+        return err
+
+    query = str(request.query_params.get("q") or "").strip()
+    mode = str(request.query_params.get("mode") or recall.INVOLUNTARY).strip()
+    if mode not in recall.VALID_MODES:
+        return JSONResponse({"error": f"mode 只能是 {sorted(recall.VALID_MODES)}"},
+                            status_code=400)
+    try:
+        limit = max(1, min(20, int(request.query_params.get("limit", 7))))
+    except (TypeError, ValueError):
+        limit = 7
+
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+    except Exception as e:
+        logger.error(f"Recall failed to list buckets / 召回列桶失败: {e}")
+        return JSONResponse({"error": "memory unavailable"}, status_code=503)
+
+    candidates = _breath_memory_candidates(all_buckets) + _breath_feel_candidates(all_buckets)
+    touches = recall_journal.touch_summary(config["buckets_dir"])
+    selected = recall.select(
+        candidates,
+        now=datetime.now(),
+        query=query,
+        limit=limit,
+        marks_by_bucket=_load_all_marks(),
+        touches_by_bucket={k: v.get("last_touch") for k, v in touches.items()},
+    )
+    elapsed = recall.describe_elapsed(
+        recall_journal.last_encounter(config["buckets_dir"]), datetime.now()
+    )
+    bundle = recall.build_bundle(
+        selected, elapsed, mode,
+        recall_id=uuid.uuid4().hex[:16],
+        query=query,
+    )
+    bundle["text"] = recall.format_bundle(bundle)
+    return JSONResponse(bundle, headers={"Access-Control-Allow-Origin": "*"})
+
+
+@mcp.custom_route("/api/recall/confirm", methods=["POST"])
+async def api_recall_confirm(request):
+    """Say that a bundle actually reached the agent. Idempotent on recall_id.
+
+    Only now does anything get written. A bundle that was fetched, scored and
+    then dropped leaves no trace, because nothing happened to those memories.
+    到这一步才写东西。取了、算了分、最后没用上的 bundle 不留痕迹，
+    因为那些记忆身上什么都没发生。
+    """
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    try:
+        result = recall_journal.record_touch(
+            config["buckets_dir"],
+            recall_id=body.get("recall_id", ""),
+            mode=str(body.get("mode") or recall.INVOLUNTARY),
+            bucket_ids=body.get("bucket_ids") or [],
+            endpoint=_declared_endpoint(body, request),
+            session_id=str(body.get("session_id") or ""),
+        )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse(result, headers={"Access-Control-Allow-Origin": "*"})
+
+
+# =============================================================
 # /api/status — system status for Dashboard settings tab
 # /api/status — Dashboard 设置页用系统状态
 # =============================================================
@@ -10149,6 +10924,18 @@ if __name__ == "__main__":
         else:
             _app = mcp.sse_app()
 
+        # Claim memories already being read as inner BEFORE serving starts.
+        # Running this alongside would leave a window in which a legacy inner
+        # memory reads as not-inner - a wrong answer, briefly, about something
+        # that took months to become true.
+        # 在开始服务**之前**认领。跟服务并行跑会留下一个窗口,
+        # 那期间一条老的 inner 记忆会被读成非 inner ——
+        # 对一件花了几个月才变成真的事,给出一个短暂的错误答案。
+        try:
+            asyncio.run(_backfill_legacy_inner())
+        except Exception as e:
+            logger.warning(f"legacy inner backfill failed / 认领失败: {e}")
+
         async def _decay_background_loop():
             try:
                 await decay_engine.ensure_started()
@@ -10164,6 +10951,56 @@ if __name__ == "__main__":
         decay_thread = threading.Thread(target=_start_decay_background, daemon=True)
         decay_thread.start()
 
+        from starlette.middleware.base import BaseHTTPMiddleware
+        from starlette.responses import JSONResponse as _JSONResponse
+
+        class FrontDoorMiddleware(BaseHTTPMiddleware):
+            async def dispatch(self, request, call_next):
+                path = request.url.path.rstrip("/") or "/"
+                # CORS preflight carries no credentials by design; blocking it
+                # would break the browser before it ever gets to send them.
+                # CORS 预检按设计就不带凭据;拦掉它,浏览器根本走不到送凭据那一步。
+                if request.method == "OPTIONS" or path in PUBLIC_PATHS:
+                    return await call_next(request)
+                if _door_is_open(request):
+                    return await call_next(request)
+                return _JSONResponse(
+                    {"error": "Unauthorized", "setup_needed": _is_setup_needed()},
+                    status_code=401,
+                )
+
+        _pwd = _configured_api_password()
+        if _pwd and not _configured_api_token():
+            try:
+                _pwd.encode("ascii")
+            except UnicodeEncodeError:
+                logger.warning(
+                    "Password is non-ASCII, so machine clients cannot present it "
+                    "in a header. Set OMBRE_API_TOKEN for them, or they will get "
+                    "401. Browser login is unaffected. / "
+                    "密码是非 ASCII 的,机器客户端没法把它放进 header。"
+                    "给它们设一个 OMBRE_API_TOKEN,否则它们会一直 401。"
+                    "浏览器登录不受影响。"
+                )
+
+        if _is_setup_needed():
+            # Locking everything now would lock her out of setting the password
+            # in the first place. Loud, repeatedly, instead of silently open.
+            # 现在就锁死会把她锁在「设置密码」这一步之外。
+            # 那就大声说、反复说,而不是悄悄开着。
+            logger.warning(
+                "NO PASSWORD SET — every route is reachable without one. "
+                "Open /dashboard and set one before exposing this to a network. / "
+                "没有设置密码 —— 所有路由都不需要密码就能到。"
+                "接到网络上之前,先打开 /dashboard 设一个。"
+            )
+        else:
+            _app.add_middleware(FrontDoorMiddleware)
+            logger.info(
+                "Front door enabled: session cookie or Bearer password required / "
+                "大门已启用:需要 session cookie 或 Bearer 密码"
+            )
+
         _app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
@@ -10175,3 +11012,139 @@ if __name__ == "__main__":
         uvicorn.run(_app, host="0.0.0.0", port=OMBRE_PORT)
     else:
         mcp.run(transport=transport)
+
+
+# ============================================================
+# /api/source — resolve an interpretation's evidence
+# /api/source —— 把一条解释的证据兑现出来
+#
+# Read-only, and there is no counterpart that writes. An interpretation that
+# cites utterance ids nobody can look up is not actually citable; this is what
+# makes "derived from" checkable rather than decorative.
+# 只读，而且没有对应的写入口。一条引用了没人查得到的话语 id 的解释，
+# 其实是不可引用的；这个路由让 derived_from 真的可核对，而不只是装饰。
+# ============================================================
+@mcp.custom_route("/api/source", methods=["GET"])
+async def api_source(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err:
+        return err
+
+    raw = str(request.query_params.get("ids") or "").strip()
+    ids = [x.strip() for x in raw.split(",") if x.strip()]
+    if not ids:
+        return JSONResponse({"error": "ids 是必须的（逗号分隔的 utterance_id）"},
+                            status_code=400)
+    try:
+        found = source_log.resolve(config["buckets_dir"], ids)
+    except OSError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    # Say which ids could not be resolved rather than quietly returning fewer
+    # rows — a caller checking evidence needs to know its evidence is missing.
+    # 明说哪些 id 兑现不了，而不是默默少返回几行 ——
+    # 来核对证据的调用方，需要知道证据不见了。
+    return JSONResponse({
+        "utterances": [found[i] for i in ids if i in found],
+        "missing": [i for i in ids if i not in found],
+        "authority": "source",
+        "read_only": True,
+    })
+
+
+# ============================================================
+# /api/episodes — stretches of lived time, recomputed from source
+# /api/episodes —— 从原始记录重算出来的、活过的时间段
+#
+# Read-only, and there is no counterpart that writes: episodes are a
+# deterministic function of the utterance log, so storing them would create a
+# second authority that can drift from the first.
+# 只读,而且没有对应的写入口:经历段是话语账的确定性函数,
+# 存下来等于造出第二个权威,会跟第一个飘开。
+# ============================================================
+@mcp.custom_route("/api/episodes", methods=["GET"])
+async def api_episodes(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err:
+        return err
+
+    default_gap = float(config.get("episode_gap_minutes") or 0) * 60 \
+        or episode.DEFAULT_GAP_SECONDS
+    try:
+        gap = float(request.query_params.get("gap_seconds") or default_gap)
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "gap_seconds must be a number"}, status_code=400)
+    if gap <= 0:
+        return JSONResponse({"error": "gap_seconds must be positive"}, status_code=400)
+
+    try:
+        limit = max(1, min(200, int(request.query_params.get("limit") or 20)))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+
+    try:
+        episodes = episode.rebuild(config["buckets_dir"], gap)
+    except OSError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    return JSONResponse({
+        "episodes": episodes[-limit:],
+        "total": len(episodes),
+        # The threshold is part of the answer: a different gap is a different
+        # segmentation, not a corrected one.
+        # 阈值是答案的一部分:换一个 gap 是另一种切法,不是「改对了」的那一种。
+        "gap_seconds": gap,
+        "authority": "episode",
+        "derived_from": "source",
+        "read_only": True,
+    })
+
+
+# ============================================================
+# /api/interpretation — how a memory has been read over time
+# /api/interpretation —— 一条记忆一路以来是怎么被读的
+#
+# Read-only. The standing reading is recomputed from the marks rather than
+# read from a stored field, so reversing a reading can never destroy the fact
+# that it was once held.
+# 只读。当前读法是从 marks 重算的,不是从某个存下来的字段读的 ——
+# 所以推翻一个读法,永远不会毁掉「它曾经被持有过」这件事。
+# ============================================================
+@mcp.custom_route("/api/interpretation", methods=["GET"])
+async def api_interpretation(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err:
+        return err
+
+    bucket_id = str(request.query_params.get("bucket_id") or "").strip()
+    if not bucket_id:
+        return JSONResponse({"error": "bucket_id 是必须的"}, status_code=400)
+
+    try:
+        mark_rows = _load_all_marks().get(bucket_id, [])
+        reading = interpretation.standing_reading(mark_rows)
+        past = interpretation.history(config["buckets_dir"], bucket_id)
+    except OSError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    return JSONResponse({
+        "bucket_id": bucket_id,
+        "standing": reading,
+        # Who read it, and from which body. Two readers disagreeing is not a
+        # contradiction to resolve; it is two true records.
+        # 谁读的,从哪个身体读的。两个读者不一致不是需要解决的矛盾,是两条都为真的记录。
+        "marks": [
+            {"mark": r.get("mark"), "note": r.get("note") or "",
+             "at": r.get("timestamp"), "actor": r.get("actor") or "",
+             "endpoint": r.get("endpoint") or ""}
+            for r in mark_rows
+        ],
+        "transitions": past,
+        "ever_inner": any(t.get("now") == interpretation.READING_INNER for t in past),
+        "authority": "interpretation",
+        "derived_from": "marks",
+        "read_only": True,
+    })

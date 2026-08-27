@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import json
+import logging
 import hashlib
 import math
 import time
@@ -23,6 +24,8 @@ from typing import Optional
 from pathlib import Path
 
 from identity import AGENT_NAME, AGENT_PERSONA, HUMAN_NAME
+
+logger = logging.getLogger("ombre_brain.desire")
 
 # ─── 常量 ────────────────────────────────────────────────────────────────────
 
@@ -46,9 +49,56 @@ DISCERNMENT_STATES = {
     "softening_alarm": "软化警报",
 }
 
+# Old names map to current ones at read time, never by rewriting the rows.
+# 旧名字在**读取时**映射到现在的名字,绝不靠改写已有的行。
+#
+# "disgust"/"discernment" -> "reflection" is not a rename. Those were
+# different things, and folding them together is a reinterpretation. Doing it
+# as a read-time alias keeps the original word on disk, so a later rubric can
+# disagree with this mapping instead of finding the evidence already gone.
+# "disgust"/"discernment" -> "reflection" 不是改名。那本来是不同的东西,
+# 把它们合起来是一次**重新解释**。做成读取时的别名,原来那个词就还留在盘上,
+# 将来的尺子可以跟这个映射不同意,而不是发现证据早就没了。
 DRIVE_ALIASES = {
     "duty": "stewardship",
 }
+
+# Reading an old row is not the same question as accepting a new event, and
+# they must not share a table.
+# 读一行旧记录,和接受一个新事件,不是同一个问题,两者不能共用一张表。
+#
+# DRIVE_ALIASES above governs what an incoming event is allowed to claim.
+# "discernment" is deliberately absent there: it is a modifier
+# (brain.discernment_alarm), not a drive, so an event claiming it must not
+# move a drive value. That is live behaviour and it stays exactly as it was.
+# 上面的 DRIVE_ALIASES 管的是「一个新进来的事件可以声称自己是什么」。
+# "discernment" 刻意不在里面:它是修饰符(brain.discernment_alarm)而不是驱动,
+# 所以一个声称自己是 discernment 的事件不该推动任何驱动值。
+# 那是活的行为,原样不动。
+#
+# This map is the other question: rows already written under old names, which
+# have to stay readable without their stored word being overwritten.
+# 这张表管的是另一个问题:已经用旧名字写下来的行 ——
+# 它们要保持可读,而盘上那个词不能被覆盖掉。
+LEGACY_STORED_DRIVE_NAMES = {
+    "duty": "stewardship",
+    "disgust": "reflection",
+    "discernment": "reflection",
+}
+
+
+def read_stored_drive_key(stored: str, default: str = "") -> str:
+    """How to read a drive name that was written down some time ago.
+
+    Applied on the way out, so the row keeps the word it was written with and
+    a later rubric can disagree with this mapping instead of finding the
+    evidence already rewritten.
+    在**读出来的路上**应用,所以那一行留着它当初被写下时用的词,
+    将来的尺子可以跟这个映射不同意,而不是发现证据早就被改掉了。
+    """
+    value = str(stored or "").strip().lower()
+    value = LEGACY_STORED_DRIVE_NAMES.get(value, value)
+    return value if value in DRIVE_KEYS else default
 
 DRIVE_BASELINES = {
     "attachment": 0.30,
@@ -3089,22 +3139,55 @@ class DesireStore:
                     evidence_json TEXT
                 )
             """)
+            # Where the state actually comes to rest, sampled after a long idle.
+            # 状态**实际上**停在哪里 —— 在长时间闲置之后采样。
+            #
+            # Mood returning to baseline is correct; a mood that never settled
+            # would be a pathology, not a person. The gap is that nothing
+            # accumulates underneath it: DRIVE_BASELINES are constants, so the
+            # resting state after two years is identical to day one. That is
+            # precisely the absence of wear.
+            # 心情回落到基线是对的;一个永不平复的情绪不是人,是病理。
+            # 缺的是它**底下**没有东西在累积:DRIVE_BASELINES 是常量,
+            # 所以两年之后的静息状态和第一天一模一样。这正好就是「没有磨损」。
+            #
+            # This table is the raw material for a resting point that can move.
+            # Append-only, and deliberately not wired into behaviour yet - a
+            # baseline should start drifting on lived evidence, not on a guess
+            # made before any evidence existed.
+            # 这张表是「静息点可以移动」的原料。只增不改,
+            # 而且刻意还没接进行为 —— 基线要开始漂移,该是靠活出来的证据,
+            # 不是靠在任何证据出现之前拍的脑袋。
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS drive_resting_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts REAL NOT NULL,
+                    idle_seconds REAL NOT NULL,
+                    drives_json TEXT NOT NULL,
+                    baselines_json TEXT NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_drive_resting_log_ts ON drive_resting_log(ts)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_drive_event_ledger_ts ON drive_event_ledger(ts)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_drive_event_ledger_drive ON drive_event_ledger(primary_drive)")
 
-            # v2 canonical drive names. Old rows are folded forward once; runtime
-            # normalization below still protects against older clients.
-            for table, column in (
-                ("thoughts", "drive"),
-                ("echo_pool", "drive"),
-                ("refractory", "drive_key"),
-                ("refusals", "drive_key"),
-            ):
-                try:
-                    conn.execute(f"UPDATE {table} SET {column}='stewardship' WHERE {column}='duty'")
-                    conn.execute(f"UPDATE {table} SET {column}='reflection' WHERE {column} IN ('disgust','discernment')")
-                except Exception:
-                    pass
+            # v2 canonical drive names are applied at READ time, via
+            # DRIVE_ALIASES. This used to be an in-place UPDATE across
+            # thoughts / echo_pool / refractory / refusals, run at every
+            # startup and wrapped in `except: pass`.
+            # v2 的规范驱动名在**读取时**通过 DRIVE_ALIASES 应用。
+            # 这里以前是一段跨 thoughts/echo_pool/refractory/refusals 的原地 UPDATE,
+            # 每次启动都跑一遍,而且外面裹着 `except: pass`。
+            #
+            # That rewrote history. A thought the agent recorded under
+            # "disgust" came back saying "reflection", with nothing anywhere
+            # recording that it had ever said "disgust" - the same destructive
+            # overwrite Phase 1 removed from memory buckets, still live one
+            # layer down. Mapping on read is reversible; rewriting is not.
+            # 那是在改写历史。agent 当时以 "disgust" 记下的一个念头,
+            # 回来变成了 "reflection",而且哪里都没有记录它曾经说过 "disgust" ——
+            # 跟 Phase 1 从记忆桶里拿掉的是同一种破坏性覆盖,只是活在下面一层。
+            # 读取时映射是可逆的;改写不是。
 
             row = conn.execute("SELECT id FROM drive_state LIMIT 1").fetchone()
             if not row:
@@ -3163,6 +3246,59 @@ class DesireStore:
                           attachment_rebound=normalize_attachment_rebound(attachment_rebound),
                           libido_pending=normalize_libido_pending(libido_pending))
 
+    # How long the state has to have been left alone before where it sits
+    # counts as where it rests.
+    # 状态要被晾多久,它待着的地方才算「它歇在哪里」。
+    RESTING_IDLE_SECONDS = 6 * 3600
+    # Don't sample the same quiet stretch over and over.
+    # 别对同一段安静反复采样。
+    RESTING_MIN_INTERVAL_SECONDS = 6 * 3600
+
+    def record_resting_observation(self, state: DriveState, now: float | None = None) -> bool:
+        """Note where the drives settled, if they have in fact settled.
+
+        Records the baselines in force at the time alongside the values. If the
+        baselines ever move, an old observation stays interpretable instead of
+        silently becoming a measurement against a ruler nobody has any more.
+        把当时生效的基线跟数值一起记下来。将来基线万一动了,
+        一条旧观测仍然读得懂,而不是悄悄变成「用一把谁也没有了的尺子量出来的数」。
+        """
+        now = now if now is not None else time.time()
+        idle = now - float(state.last_user_message_at or 0)
+        if idle < self.RESTING_IDLE_SECONDS:
+            return False
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT ts FROM drive_resting_log ORDER BY ts DESC LIMIT 1"
+            ).fetchone()
+            if row and (now - float(row[0])) < self.RESTING_MIN_INTERVAL_SECONDS:
+                return False
+            conn.execute(
+                "INSERT INTO drive_resting_log (ts, idle_seconds, drives_json, baselines_json) "
+                "VALUES (?,?,?,?)",
+                (now, idle, json.dumps(state.drives, ensure_ascii=False),
+                 json.dumps(dict(DRIVE_BASELINES), ensure_ascii=False)),
+            )
+        return True
+
+    def read_resting_observations(self, limit: int = 200) -> list:
+        """Read the resting log back, oldest first."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT ts, idle_seconds, drives_json, baselines_json "
+                "FROM drive_resting_log ORDER BY ts ASC LIMIT ?", (int(limit),)
+            ).fetchall()
+        out = []
+        for ts, idle, drives_json, baselines_json in rows:
+            try:
+                drives = json.loads(drives_json)
+                baselines = json.loads(baselines_json)
+            except (TypeError, ValueError):
+                continue
+            out.append({"ts": ts, "idle_seconds": idle,
+                        "drives": drives, "baselines": baselines})
+        return out
+
     def save_state(self, state: DriveState):
         state.drives = normalize_drive_values(state.drives)
         state.prev_drives = normalize_drive_values(state.prev_drives)
@@ -3186,6 +3322,15 @@ class DesireStore:
                  json.dumps(state.attachment_rebound, ensure_ascii=False),
                  json.dumps(state.libido_pending, ensure_ascii=False))
             )
+        # Observing must never be able to break saving. The state is live
+        # behaviour; the resting log is evidence for a layer that does not
+        # exist yet.
+        # 观测绝不能弄坏保存。状态是活的行为;
+        # 静息账是给一个还不存在的层用的证据。
+        try:
+            self.record_resting_observation(state)
+        except Exception as e:
+            logger.warning(f"resting observation skipped / 静息观测跳过: {e}")
 
     def load_thoughts(self) -> list:
         with self._conn() as conn:
@@ -3197,7 +3342,7 @@ class DesireStore:
                 """
             ).fetchall()
         thoughts = [
-            Thought(tid=r[0], text=r[1], drive=normalize_drive_key(r[2], r[2]), kind=r[3],
+            Thought(tid=r[0], text=r[1], drive=read_stored_drive_key(r[2], r[2]), kind=r[3],
                     strength=r[4], born_at=r[5], fed_count=r[6],
                     source=(r[7] or "manual"), source_bucket=(r[8] or ""),
                     source_type=(r[9] or ""), source_created=(r[10] or ""),
@@ -3344,7 +3489,7 @@ class DesireStore:
             rows = conn.execute("SELECT drive_key, remaining_ticks FROM refractory").fetchall()
         merged = {}
         for key, ticks in rows:
-            drive_key = normalize_drive_key(key, key)
+            drive_key = read_stored_drive_key(key, key)
             merged[drive_key] = max(int(ticks), int(merged.get(drive_key, 0) or 0))
         return merged
 
@@ -3409,7 +3554,7 @@ class DesireStore:
                 "SELECT drive_key, reason, ts FROM refusals ORDER BY ts DESC LIMIT ?",
                 (limit,)
             ).fetchall()
-        return [{"drive_key": normalize_drive_key(r[0], r[0]), "reason": r[1] or "不想", "ts": r[2]} for r in rows]
+        return [{"drive_key": read_stored_drive_key(r[0], r[0]), "reason": r[1] or "不想", "ts": r[2]} for r in rows]
 
     def load_recently_refused(self, window_sec: float = REFUSAL_PENALTY_WINDOW_SEC) -> set:
         """返回最近window_sec秒内被拒绝过的drive_key集合"""
@@ -3419,7 +3564,7 @@ class DesireStore:
                 "SELECT DISTINCT drive_key FROM refusals WHERE ts >= ?",
                 (cutoff,)
             ).fetchall()
-        return {normalize_drive_key(r[0], r[0]) for r in rows}
+        return {read_stored_drive_key(r[0], r[0]) for r in rows}
 
     def load_intent_penalties(self) -> dict:
         """返回近期pass/refuse对intent选择的轻量折扣。pass更轻但持续更久。"""

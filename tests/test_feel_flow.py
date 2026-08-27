@@ -218,7 +218,18 @@ class TestFeelLifecycle:
 
     @pytest.mark.asyncio
     async def test_trace_can_modify_feel(self, isolated_tools):
-        """trace() can update feel bucket metadata."""
+        """A feel body can still be edited — but only as a journalled edit.
+
+        This used to assert that update(content=…) silently rewrote the body.
+        That capability was removed: a feel is what the agent felt at the time,
+        which makes it history like any other memory. Editing is still allowed,
+        it just has to say who and why, and the old text is kept.
+        这条以前断言 update(content=…) 可以静默改写正文。那个能力被取消了：
+        feel 是 agent 当时的感受，跟别的记忆一样是历史。改可以，
+        但必须说明谁改、为什么，并且旧文本要留下。
+        """
+        from bucket_manager import BucketRevision, HistoryProtected
+
         bm, dh, de, bd = isolated_tools
 
         bid = await bm.create(
@@ -228,12 +239,24 @@ class TestFeelLifecycle:
             name=None, bucket_type="feel",
         )
 
-        # Update content
-        await bm.update(bid, content="修改后的 feel 内容")
+        # Runtime has no authority to rewrite it
+        with pytest.raises(HistoryProtected):
+            await bm.update(bid, content="修改后的 feel 内容")
+
+        # An explicit, attributed edit does go through
+        await bm.update(
+            bid, content="修改后的 feel 内容",
+            _revision=BucketRevision(actor="粥粥", reason="她自己改的"),
+        )
 
         all_b = await bm.list_all()
         updated = next(b for b in all_b if b["id"] == bid)
         assert "修改后" in updated["content"]
+
+        # and the original wording survives
+        rows = bm.revisions_for(bid)
+        assert len(rows) == 1
+        assert rows[0]["previous_content"].strip() == "原始 feel 内容"
 
     @pytest.mark.asyncio
     async def test_feel_crystallization_data(self, isolated_tools):

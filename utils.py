@@ -11,8 +11,10 @@
 
 import os
 import re
+import json
 import uuid
 import yaml
+import hashlib
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -230,3 +232,155 @@ def now_iso() -> str:
     返回当前时间的 ISO 格式字符串。
     """
     return datetime.now().isoformat(timespec="seconds")
+
+
+# ---------------------------------------------------------
+# Content identity (NOT similarity)
+# 正文同一性判断（不是相似度）
+#
+# Used by the write paths to tell "the same write happened twice" apart from
+# "a new, similar experience". Only the former may be deduplicated; the latter
+# is history and must be kept. Keyed on the bytes, never on an embedding.
+# 用来区分「同一次写入重试」和「一段新的相似经历」。
+# 只有前者可以去重，后者是历史，必须留着。认字节，不认向量。
+# ---------------------------------------------------------
+def content_fingerprint(text: str) -> str:
+    """
+    Stable hash of a memory body, ignoring surrounding and trailing whitespace.
+    正文指纹：忽略首尾空白和行尾空格后取 sha256。
+    """
+    normalized = "\n".join(
+        line.rstrip() for line in str(text or "").strip().splitlines()
+    )
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def find_exact_duplicate(candidates: list, content: str):
+    """
+    Return the candidate bucket whose body is identical to `content`, else None.
+    返回正文与 content 完全相同的桶；没有就返回 None。
+
+    `candidates` are search results shaped like {"id", "content", "metadata"}.
+    """
+    target = content_fingerprint(content)
+    for bucket in candidates or []:
+        if not isinstance(bucket, dict):
+            continue
+        if content_fingerprint(bucket.get("content", "")) == target:
+            return bucket
+    return None
+
+
+# ============================================================
+# Cross-process serialization / 跨进程串行化
+#
+# Once this is a URL, "one memory" means several bodies writing to the same
+# files at the same time. Every append-only guarantee in this codebase is a
+# read-modify-write underneath, and a read-modify-write without a lock is a
+# lost update waiting to happen — including the revision journal, whose whole
+# job is to make sure a previous wording is recoverable.
+# 一旦挂成网址，「一份记忆」就意味着好几个身体同时往同一批文件里写。
+# 这个代码库里每一条 append-only 保证，底下都是一次读-改-写；
+# 没有锁的读-改-写迟早丢一次更新 —— 包括那本流水账，
+# 而它存在的全部意义就是保证旧说法换得回来。
+#
+# flock is advisory and POSIX-only. That is the right trade here: the data
+# lives in plain Markdown files that the user also edits by hand in Obsidian,
+# so the lock must never make a file unreadable to anything that ignores it.
+# flock 是建议锁，且只在 POSIX 上有。这里这个取舍是对的：
+# 数据就是一堆纯 Markdown，她自己也会在 Obsidian 里手动编辑，
+# 所以锁绝不能让不理会它的程序读不了文件。
+# ============================================================
+
+import fcntl
+import errno
+import time as _time
+from contextlib import contextmanager
+
+LOCK_TIMEOUT_SECONDS = 10.0
+
+
+class LockTimeout(TimeoutError):
+    """Another body held this for too long. / 另一个身体占用太久。"""
+
+
+@contextmanager
+def exclusive(lock_target: str, timeout: float = LOCK_TIMEOUT_SECONDS):
+    """Serialize access to `lock_target` across processes.
+
+    Locks a sidecar `<path>.lock` rather than the file itself, so the payload
+    can still be truncated, replaced, or renamed while held — and so a reader
+    that knows nothing about locking is never blocked.
+    锁的是旁边的 `<path>.lock` 而不是文件本身，这样持锁期间仍然可以
+    截断/替换/重命名正文文件；也让完全不懂锁的读者永远不会被挡住。
+
+    Times out instead of hanging forever: a wedged endpoint must not be able
+    to freeze every other endpoint.
+    会超时而不是永远挂着：一个卡死的端不该冻住其余所有端。
+    """
+    lock_path = str(lock_target) + ".lock"
+    parent = os.path.dirname(lock_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    deadline = _time.monotonic() + max(0.0, timeout)
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as e:
+                if e.errno not in (errno.EAGAIN, errno.EACCES):
+                    raise
+                if _time.monotonic() >= deadline:
+                    raise LockTimeout(
+                        f"Could not acquire {lock_path} within {timeout}s / "
+                        f"{timeout} 秒内没拿到锁"
+                    )
+                _time.sleep(0.02)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def append_jsonl(path: str, row: dict) -> None:
+    """Append one journal line durably, serialized against other writers.
+    追加一行流水账，落盘且与其他写入者串行。"""
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with exclusive(path):
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+
+def write_atomic(path: str, text: str) -> None:
+    """Replace a file's contents all-at-once, or not at all.
+
+    `open(path, "w")` truncates first. Losing power between the truncate and
+    the write does not corrupt the memory — it deletes it, leaving a zero-byte
+    file where a memory used to be.
+    `open(path, "w")` 先截断。截断和写入之间掉电不是把记忆写坏，是把它写没了 ——
+    原地留下一个 0 字节文件。
+    """
+    parent = os.path.dirname(path) or "."
+    os.makedirs(parent, exist_ok=True)
+    tmp = os.path.join(parent, f".{os.path.basename(path)}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise

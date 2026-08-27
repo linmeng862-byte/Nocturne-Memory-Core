@@ -21,10 +21,23 @@ log_level: "INFO"
 # 保持默认则使用内置的 ./buckets/ 目录
 # buckets_dir: "/path/to/your/Obsidian Vault/Ombre Brain"
 
+# --- Semantic merge / 语义合并（默认关闭）---
+# History is append-only by default. A new memory that merely *resembles* an
+# old one is stored as its own bucket; the old text is never rewritten.
+# Turning this ON restores the legacy behaviour: a similar bucket is fed to an
+# LLM together with the new content and REPLACED IN PLACE. There is no
+# revision history and no backup — the old wording is gone for good.
+# Only turn it on if you would rather have small buckets than a real past.
+#
+# 历史默认只增不改。新记忆哪怕跟旧的很像，也另存一条，绝不重写旧正文。
+# 打开这个开关会恢复老行为：相似的桶连同新内容一起喂给 LLM，然后**就地覆盖**。
+# 没有版本历史，没有备份，旧的措辞就此消失。
+# 除非你宁可要小桶也不要真实的过去，否则别开。
+semantic_merge: false
+
 # --- Merge threshold / 桶合并阈值 ---
-# When storing a new memory, if similarity with an existing bucket exceeds
-# this value (0-100), merge instead of creating a new one
-# 存新记忆时，如果与已有桶的相似度超过此值（0-100），则合并而非新建
+# Only consulted when semantic_merge is true (above).
+# 只在上面 semantic_merge 打开时才起作用。
 merge_threshold: 75
 
 # --- Dehydration API / 脱水压缩 API 配置 ---
@@ -94,3 +107,13 @@ wikilink:
   auto_top_k: 4
   min_keyword_len: 3
   exclude_keywords: []
+
+# How long a silence has to be before it counts as the end of an episode.
+# 沉默要多久才算一段经历的结束。
+#
+# This is a segmentation choice, not a truth: a different value gives a
+# different cut of the same unchanged source. Nothing is destroyed by changing
+# it, and episodes are recomputed on every read, so it can be tuned freely.
+# 这是一个切分选择,不是真相:换一个值,是对同一份没变过的原始记录换一种切法。
+# 改它不会毁掉任何东西,而且经历段每次读取都会重算,所以可以随便调。
+episode_gap_minutes: 30

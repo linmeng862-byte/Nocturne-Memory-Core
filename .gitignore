@@ -8,3 +8,8 @@ desire.db
 weather_residue.json
 dehydration_cache.db
 embeddings.db
+
+# Advisory lock sidecars — runtime only, never content
+*.lock
+.locks/
+.legacy_inner_claimed

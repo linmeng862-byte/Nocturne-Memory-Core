@@ -26,7 +26,10 @@
 # ============================================================
 
 import os
+import io
+import json
 import math
+import uuid
 import logging
 import shutil
 from datetime import datetime
@@ -36,9 +39,62 @@ from typing import Optional
 import frontmatter
 from rapidfuzz import fuzz
 
-from utils import generate_bucket_id, sanitize_name, safe_path, now_iso
+from utils import (generate_bucket_id, sanitize_name, safe_path, now_iso,
+                   content_fingerprint, exclusive, append_jsonl, write_atomic,
+                   LockTimeout)
 
 logger = logging.getLogger("ombre_brain.bucket")
+
+
+# ============================================================
+# Mutation authority
+# 改写权限
+#
+# Normal runtime has no permission to rewrite a memory body. Bodies are
+# history: once written they are what happened, and an agent deciding it
+# would phrase things differently today is not a reason to edit the past.
+# 普通运行时没有改写记忆正文的权限。正文就是历史 ——
+# 写下来就是发生过的样子，agent 今天想换个说法不是修改过去的理由。
+#
+# An explicit human edit is still allowed, but it can never be silent: the
+# previous body is journalled first, so every rewrite is recoverable and
+# every rewrite can be asked "who did this, when, and why".
+# 人显式修改仍然允许，但绝不允许静默：旧正文先入流水账，
+# 每一次改写都可回滚、都能回答「谁改的、什么时候、为什么」。
+# ============================================================
+
+class StaleWrite(RuntimeError):
+    """The body changed under you between reading it and editing it.
+    读到它和改它之间，正文被别人动过了。"""
+
+
+class HistoryProtected(PermissionError):
+    """Raised when something tries to rewrite a memory body without authority."""
+
+
+class BucketRevision:
+    """One auditable body edit. Everything here is required — a revision that
+    cannot say who and why is not an audit record, it is just an overwrite.
+    一次可审计的正文修改。字段都是必填的：
+    说不出谁改的、为什么改的，那不是审计记录，那只是覆盖。"""
+
+    def __init__(self, actor: str, reason: str, expected_hash: str = ""):
+        self.actor = str(actor or "").strip()
+        self.reason = str(reason or "").strip()
+        # Optional compare-and-swap. A caller that read the body first can pin
+        # the wording it actually saw; if someone else edited in between the
+        # edit is refused, instead of silently overwriting a body this caller
+        # never read. The lock keeps the journal honest about what *was*
+        # overwritten; this keeps the editor honest about what they meant to.
+        # 可选的 compare-and-swap。先读过正文的调用方可以钉住自己真正看到的那份；
+        # 中间被别人改过就拒绝，而不是默默覆盖一份它从没读过的正文。
+        # 锁保证流水账诚实地记下「被覆盖的是什么」；
+        # 这条保证「改的人」诚实地知道自己覆盖的是什么。
+        self.expected_hash = str(expected_hash or "").strip()
+        if not self.actor or not self.reason:
+            raise HistoryProtected(
+                "A body edit needs both actor and reason / 改正文必须给出 actor 和 reason"
+            )
 
 
 class BucketManager:
@@ -196,8 +252,7 @@ class BucketManager:
         file_path = safe_path(target_dir, filename)
 
         try:
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(frontmatter.dumps(post))
+            write_atomic(file_path, frontmatter.dumps(post))
         except OSError as e:
             logger.error(f"Failed to write bucket file / 写入桶文件失败: {file_path}: {e}")
             raise
@@ -252,12 +307,96 @@ class BucketManager:
     # 更新桶
     # Supports: content, tags, importance, valence, arousal, name, resolved
     # ---------------------------------------------------------
+    # ---------------------------------------------------------
+    # Revision journal — append-only, next to the buckets
+    # 修改流水账 —— append-only，跟记忆放在一起
+    #
+    # Stores the FULL previous body, not just its hash. A hash proves that
+    # something changed; it does not give the old wording back, and giving the
+    # old wording back is the entire point.
+    # 存的是**完整旧正文**，不只是 hash。hash 只能证明「变过」，
+    # 换不回原来的说法 —— 而换得回来才是这件事的意义。
+    # ---------------------------------------------------------
+    def _revisions_path(self) -> str:
+        return os.path.join(self.base_dir, "revisions.jsonl")
+
+    def _journal_revision(self, bucket_id: str, old_body: str, new_body: str,
+                          revision: "BucketRevision") -> str:
+        revision_id = uuid.uuid4().hex[:16]
+        row = {
+            "revision_id": revision_id,
+            "bucket_id": bucket_id,
+            "edited_at": now_iso(),
+            "actor": revision.actor,
+            "reason": revision.reason,
+            "previous_hash": content_fingerprint(old_body),
+            "new_hash": content_fingerprint(new_body),
+            "previous_content": old_body,
+        }
+        # Journal first, edit second. If this raises, the body is not touched.
+        # Serialized: two bodies journalling at once must not interleave.
+        # 先记账再改。这里抛了，正文就不会被动。串行化：两个身体同时记账不能交错。
+        append_jsonl(self._revisions_path(), row)
+        logger.info(
+            f"Body revision journalled / 正文修改已记账: {bucket_id} "
+            f"rev={revision_id} by={revision.actor}"
+        )
+        return revision_id
+
+    def revisions_for(self, bucket_id: str = "") -> list[dict]:
+        """Read back the journal, newest last. Empty when nothing was ever edited.
+        回读流水账，最新的在最后。从没改过就是空的。"""
+        path = self._revisions_path()
+        if not os.path.exists(path):
+            return []
+        rows = []
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not bucket_id or row.get("bucket_id") == bucket_id:
+                    rows.append(row)
+        return rows
+
+    def _lock_target(self, bucket_id: str) -> str:
+        """A per-bucket lock path that does not move when the bucket does.
+
+        Buckets get relocated between permanent/dynamic/feel and between domain
+        folders, so the file path is not a stable identity to lock on.
+        桶会在 permanent/dynamic/feel 和各主题域目录之间搬家，
+        所以文件路径不是一个可以拿来上锁的稳定身份。
+        """
+        return os.path.join(self.base_dir, ".locks", str(bucket_id))
+
     async def update(self, bucket_id: str, **kwargs) -> bool:
         """
         Update bucket content or metadata fields.
         更新桶的内容或元数据字段。
+
+        The whole read-modify-write is serialized across processes. Without
+        this, two endpoints updating the same memory means the later write
+        silently discards the earlier one — and worse, the revision journal
+        would record a "previous_content" that was never the text actually
+        overwritten, quietly making the recoverability guarantee a lie.
+        整个读-改-写跨进程串行。没有这个，两个端同时更新同一条记忆时，
+        后写的会默默丢掉先写的 —— 更糟的是，流水账里记下的 previous_content
+        会不是真正被覆盖掉的那份文本，让「换得回来」这个保证悄悄变成假话。
         """
+        try:
+            with exclusive(self._lock_target(bucket_id)):
+                return await self._update_locked(bucket_id, **kwargs)
+        except LockTimeout as e:
+            logger.error(f"Update gave up waiting for lock / 等锁超时放弃更新: {bucket_id}: {e}")
+            return False
+
+    async def _update_locked(self, bucket_id: str, **kwargs) -> bool:
         preserve_last_active = bool(kwargs.pop("_preserve_last_active", False))
+        revision = kwargs.pop("_revision", None)
         file_path = self._find_bucket_file(bucket_id)
         if not file_path:
             return False
@@ -274,9 +413,35 @@ class BucketManager:
         if is_pinned:
             kwargs.pop("importance", None)  # silently ignore importance update
 
-        # --- Update only fields that were passed in / 只改传入的字段 ---
+        # --- Body edits need authority, and are journalled before they land ---
+        # --- 改正文需要授权，且落盘前先入流水账 ---
         if "content" in kwargs:
-            post.content = kwargs["content"]  # wikilink injection disabled; LLM adds [[]] via prompt
+            old_body = post.content
+            new_body = kwargs["content"]
+            if content_fingerprint(old_body) == content_fingerprint(new_body):
+                # Same text — nothing to authorize and nothing to journal.
+                # 正文没变，不需要授权也不用记账。
+                kwargs.pop("content")
+            else:
+                if not isinstance(revision, BucketRevision):
+                    raise HistoryProtected(
+                        f"Refusing to rewrite the body of {bucket_id} without a revision. "
+                        f"Normal runtime is create-only; an explicit edit must pass "
+                        f"_revision=BucketRevision(actor=…, reason=…). / "
+                        f"拒绝无审计地改写 {bucket_id} 的正文。"
+                    )
+                # If the editor pinned the wording they read, honour it.
+                # 如果改的人钉住了自己读到的那份说法，就认这个。
+                if revision.expected_hash and \
+                        revision.expected_hash != content_fingerprint(old_body):
+                    raise StaleWrite(
+                        f"{bucket_id} changed after you read it; refusing to overwrite "
+                        f"a body you never saw. Re-read it and decide again. / "
+                        f"{bucket_id} 在你读完之后被改过；拒绝覆盖一份你没看过的正文。"
+                        f"重读一遍再决定。"
+                    )
+                self._journal_revision(bucket_id, old_body, new_body, revision)
+                post.content = new_body
         if "tags" in kwargs:
             post["tags"] = kwargs["tags"]
         if "importance" in kwargs:
@@ -343,8 +508,7 @@ class BucketManager:
                 target_dir = self.dynamic_dir
 
         try:
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(frontmatter.dumps(post))
+            write_atomic(file_path, frontmatter.dumps(post))
         except OSError as e:
             logger.error(f"Failed to write bucket update / 写入桶更新失败: {file_path}: {e}")
             return False
@@ -406,12 +570,18 @@ class BucketManager:
             return
 
         try:
-            post = frontmatter.load(file_path)
-            post["last_active"] = now_iso()
-            post["activation_count"] = post.get("activation_count", 0) + 1
-
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(frontmatter.dumps(post))
+            # activation_count is a read-increment-write, and touch() fires on
+            # every recall hit from every endpoint — the single most contended
+            # write in the system. Unserialized, concurrent touches silently
+            # undercount, and decay then treats well-used memories as neglected.
+            # activation_count 是读-加-写，而 touch() 在每个端的每次召回命中时都会跑 ——
+            # 全系统竞争最激烈的一次写。不串行的话并发触碰会默默少算，
+            # 于是衰减会把用得最多的记忆当成没人理的。
+            with exclusive(self._lock_target(bucket_id)):
+                post = frontmatter.load(file_path)
+                post["last_active"] = now_iso()
+                post["activation_count"] = post.get("activation_count", 0) + 1
+                write_atomic(file_path, frontmatter.dumps(post))
 
             # --- Time ripple: boost nearby memories within ±48h ---
             # --- 时间涟漪：±48小时内的记忆轻微唤醒 ---

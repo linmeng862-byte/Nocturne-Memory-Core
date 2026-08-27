@@ -22,7 +22,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from utils import count_tokens_approx, now_iso
+from utils import count_tokens_approx, now_iso, find_exact_duplicate as _find_exact_duplicate
 
 logger = logging.getLogger("ombre_brain.import")
 
@@ -401,6 +401,10 @@ class ImportEngine:
         self._paused = False
         self._running = False
         self._chunks: list[dict] = []
+        # Off by default: importing must not rewrite memories that are already
+        # on disk. Same switch server.py reads.
+        # 默认关：导入不许改写盘上已有的记忆。跟 server.py 同一个开关。
+        self.semantic_merge_enabled = bool(config.get("semantic_merge", False))
 
     @property
     def is_running(self) -> bool:
@@ -627,7 +631,13 @@ class ImportEngine:
         return validated
 
     async def _merge_or_create_item(self, item: dict) -> bool:
-        """Try to merge with existing bucket, or create new. Returns is_merged."""
+        """Dedup on identical body, otherwise create. Returns is_merged.
+
+        Import used to run the same destructive merge as hold(): a similar
+        existing bucket was rewritten in place by the LLM. Same rule as
+        server._merge_or_create now — similarity never authorizes overwrite.
+        导入以前也走那条毁历史的合并，现在跟 hold 一样：相似不构成覆盖的理由。
+        """
         content = item["content"]
         domain = item.get("domain", ["未分类"])
         tags = item.get("tags", [])
@@ -636,14 +646,29 @@ class ImportEngine:
         arousal = item.get("arousal", 0.3)
         name = item.get("name", "")
 
+        # --- Identical body = re-import of the same item, not a new memory ---
+        # --- 正文一模一样 = 同一条被重复导入，不再存一份 ---
+        # Exact identity only — the fuzzy search score answers "how alike",
+        # which is not the same question.
         try:
-            existing = await self.bucket_mgr.search(content, limit=1, domain_filter=domain or None)
+            on_disk = await self.bucket_mgr.list_all(include_archive=False)
         except Exception:
-            existing = []
+            on_disk = []
+
+        duplicate = _find_exact_duplicate(on_disk, content)
+        if duplicate:
+            logger.info(f"Exact duplicate on import, skipped / 导入时正文完全相同，跳过: {duplicate['id']}")
+            return False
 
         merge_threshold = self.config.get("merge_threshold", 75)
+        existing = []
+        if self.semantic_merge_enabled:
+            try:
+                existing = await self.bucket_mgr.search(content, limit=1, domain_filter=domain or None)
+            except Exception:
+                existing = []
 
-        if existing and existing[0].get("score", 0) > merge_threshold:
+        if self.semantic_merge_enabled and existing and existing[0].get("score", 0) > merge_threshold:
             bucket = existing[0]
             if not (bucket["metadata"].get("pinned") or bucket["metadata"].get("protected")):
                 try:
