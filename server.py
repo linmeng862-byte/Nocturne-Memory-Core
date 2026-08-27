@@ -103,7 +103,6 @@ from proposal_engine import ProposalEngine
 from continuity_core import (
     get_wake_context_impl,
     leave_texture_impl,
-    reentry_delta_impl,
 )
 from with_me import (
     toy_vibrate,
@@ -5074,6 +5073,7 @@ async def breath() -> str:
         candidates.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
 
         dynamic_results = []
+        _surfaced_ids = []
         for b in candidates:
             if token_budget <= 0:
                 break
@@ -5098,10 +5098,35 @@ async def breath() -> str:
                 _why_text = "、".join(f"{k} {v:.2f}" for k, v in _top if v > 0)
                 _tail = f"\n↳ id:{b['id']}" + (f"（{_why_text}）" if _why_text else "")
                 dynamic_results.append(f"{header}\n{_strip_bucket_prefix(summary)}{_tail}")
+                _surfaced_ids.append(b["id"])
                 token_budget -= summary_tokens
             except Exception as e:
                 logger.warning(f"Failed to dehydrate surfaced bucket / 浮现脱水失败: {e}")
                 continue
+
+        # Breath surfaced these, so breath has to say so. It shares recall's
+        # selector but was not writing to recall's journal, which meant every
+        # memory revisited by waking up was invisible to the accounting —
+        # `candidate_retrieved != actually_revisited` was being answered with
+        # only half the retrievals. Only what fit inside the token budget is
+        # recorded: a candidate that never got rendered was not revisited.
+        # (This is not bucket_mgr.touch(): surfacing still must not reset the
+        # decay timer. Two different meanings of "touched".)
+        # breath 用的是 recall 的选择器,却不写 recall 的账——
+        # 于是「醒来时重新看见的记忆」在账上完全不存在。
+        # 只记真的渲染出来的:没进预算的候选不算被重新看见。
+        # (这跟 bucket_mgr.touch() 不是一回事,浮现依然不该重置衰减计时。)
+        if _surfaced_ids:
+            try:
+                recall_journal.record_touch(
+                    config["buckets_dir"],
+                    recall_id=uuid.uuid4().hex[:16],
+                    mode=recall.DELIBERATE,
+                    bucket_ids=_surfaced_ids,
+                    endpoint="mcp:breath",
+                )
+            except Exception as e:
+                logger.warning(f"Breath touch not recorded / 呼吸记账失败: {e}")
 
         # --- Feel section: top weighted feels (no title shown) ---
         feel_results = []
@@ -6196,7 +6221,8 @@ async def grow(content: str) -> str:
 # Also handles deletion (delete=True)
 # 同时承接删除功能
 # =============================================================
-async def trace(
+@mcp.tool(name="revise")
+async def revise(
     bucket_id: str,
     name: str = "",
     domain: str = "",
@@ -6210,18 +6236,38 @@ async def trace(
     content: str = "",
     delete: bool = False,
     created_at: str = "",
+    reason: str = "",
 ) -> str:
-    """修改记忆元数据或内容。resolved=1沉底/0激活,pinned=1钉选/0取消,digested=1隐藏(保留但不浮现)/0取消隐藏,content=替换桶正文,delete=True删除,created_at=修改创建日期(ISO格式)。只传需改的,-1或空=不改。"""
+    """改一条记忆。resolved=1沉底/0激活,pinned=1钉选/0取消,digested=1隐藏(保留但不浮现),content=替换正文,delete=True删除,created_at=改创建日期。只传要改的,-1或空=不改。改正文和删除必须带 reason。
+
+    This used to be called `trace`, and a later `async def trace` in the same
+    module shadowed it — the function was unreachable, so nothing could edit or
+    delete a memory at all. Renaming it is what makes it exist again.
+    它原来叫 trace,被同模块后面一个同名 async def 覆盖掉了——函数根本调不到,
+    于是「改记忆」和「删记忆」整个能力都不存在。改名才让它重新存在。
+    """
 
     if not bucket_id or not bucket_id.strip():
         return "请提供有效的 bucket_id。"
 
     # --- Delete mode / 删除模式 ---
     if delete:
+        # Deleting is the one thing here that cannot be undone by another call.
+        # It leaves no revision to read back, so it has to say why on the way out.
+        # 删除是这里唯一没法用另一次调用撤回的操作,也不留修订记录,
+        # 所以它必须在出门前说清楚为什么。
+        if not reason.strip():
+            return "删除要带 reason。删掉的东西没有修订记录可以读回来。"
+        bucket = await bucket_mgr.get(bucket_id)
+        if not bucket:
+            return f"未找到记忆桶: {bucket_id}"
+        preview = (bucket.get("content") or "").strip().split("\n")[0][:60]
         success = await bucket_mgr.delete(bucket_id)
         if success:
             embedding_engine.delete_embedding(bucket_id)
-        return f"已遗忘记忆桶: {bucket_id}" if success else f"未找到记忆桶: {bucket_id}"
+            logger.info(f"deleted bucket {bucket_id}: {reason} / {preview}")
+            return f"已遗忘 {bucket_id}（{preview}）\n理由：{reason}"
+        return f"删除失败: {bucket_id}"
 
     bucket = await bucket_mgr.get(bucket_id)
     if not bucket:
@@ -6257,7 +6303,20 @@ async def trace(
     if not updates:
         return "没有任何字段需要修改。"
 
-    success = await bucket_mgr.update(bucket_id, **updates)
+    # Body edits are journalled with the full previous text. bucket_manager
+    # refuses one without authority, so an unreasoned rewrite fails loudly
+    # rather than landing unrecorded.
+    # 改正文会连旧正文全文一起入流水账。没有授权 bucket_manager 会拒——
+    # 一次没说理由的改写会明着失败,而不是悄悄落盘。
+    if "content" in updates:
+        if not reason.strip():
+            return "改正文要带 reason。旧正文会连同理由一起进修订日志。"
+        updates["_revision"] = BucketRevision(actor="mcp:revise", reason=reason)
+
+    try:
+        success = await bucket_mgr.update(bucket_id, **updates)
+    except HistoryProtected as e:
+        return f"这条改不了：{e}"
     if not success:
         return f"修改失败: {bucket_id}"
 
@@ -6350,7 +6409,8 @@ async def pulse(include_archive: bool = False) -> str:
 
 @mcp.tool()
 async def wander(mode: str, query: str = "", limit: int = 12) -> str:
-    """抽屉漫游。mode=flotsam/archive/letter/writing/window/unresolved/inner/trails。
+    """抽屉漫游。mode=flotsam/archive/letter/writing/window/unresolved/inner/trails/trace。
+    trace=按关键词全量搜索（要带 query）。
 
     trails：同题折痕时间线（潜流瘦骨+记忆差分）。潜流撞到后好奇了再进；不好奇就当没这回事。
     """
@@ -6600,16 +6660,8 @@ async def wander(mode: str, query: str = "", limit: int = 12) -> str:
 
     return (
         "mode 必须是 flotsam / archive / letter / writing / letter_human / "
-        "window / unresolved / inner / trails。全量关键词轨迹用 trace。"
+        "window / unresolved / inner / trails / trace。"
     )
-
-
-@mcp.tool(name="trace")
-async def trace(query: str, limit: int = 15) -> str:
-    """按关键词搜索记忆。"""
-    if not (query or "").strip():
-        return "trace 要带 query。它是全量轨迹搜索，不是 Breath 浮现。"
-    return await wander(mode="trace", query=query, limit=limit)
 
 
 @mcp.tool()
@@ -7094,12 +7146,6 @@ async def leave_texture(state: str, primary_feeling: str, secondary_feeling: str
 
 
 
-@mcp.tool()
-async def reentry_delta() -> str:
-    """会话中途增量刷新。"""
-    return json.dumps(reentry_delta_impl(), ensure_ascii=False, indent=2)
-
-
 # With Me — Hardware presence tools
 @mcp.tool()
 async def toy_vibrate_tool(intensity: int) -> str:
@@ -7124,70 +7170,57 @@ async def bridge_health_tool() -> str:
 
 # ── Travel MCP tools (Nowhere bridge) ─────────────────────
 
-@mcp.tool()
-async def nowhere_open_tool(to: str = None) -> str:
-    """打开门——降落。不传 to 随机降落，传地名去特定地方。"""
-    return json.dumps(nowhere_open(to), ensure_ascii=False)
+# Thirteen tools that were thirteen tool definitions in every request's
+# context, whether or not anyone was travelling. The same shape `garden` already
+# uses: one door, and a second tool that describes what is behind it. The
+# underlying nowhere_* functions are untouched — /api/with-me/action still calls
+# them directly, so the Dashboard travel panel is unaffected.
+# 十三个工具就是十三份工具定义,每一轮都在上下文里付钱,不管有没有人在旅行。
+# 用 garden 已经在用的形状:一扇门,加一个说明门后有什么的工具。
+# 底层 nowhere_* 函数没动——/api/with-me/action 还是直接调它们,Dashboard 旅行面板不受影响。
+_NOWHERE_ACTIONS = {
+    "open":        (lambda a: nowhere_open(a.get("to")),                              "打开门——降落。to=地名,不传则随机"),
+    "walk":        (lambda a: nowhere_walk(a.get("direction", "forward"),
+                                           float(a.get("distance_km", 2.0))),         "走路。direction=N/E/S/W, distance_km=0.2-5.0"),
+    "look":        (lambda a: nowhere_look(),                                         "观察周围环境"),
+    "listen":      (lambda a: nowhere_listen(int(a.get("seconds", 10))),              "收听当地电台。seconds"),
+    "meet":        (lambda a: nowhere_meet(),                                         "遇见一个当地人"),
+    "postcard":    (lambda a: nowhere_postcard(a.get("text", ""), a.get("photo_url", "")), "寄明信片回家。text, photo_url"),
+    "photo":       (lambda a: nowhere_photo(),                                        "当前位置附近的真实照片"),
+    "where":       (lambda a: nowhere_where(),                                        "当前位置和旅行状态"),
+    "leave_note":  (lambda a: nowhere_leave_note(a.get("text", "")),                  "在路边留纸条。text"),
+    "read_notes":  (lambda a: nowhere_read_notes(),                                   "读当前路边的所有纸条"),
+    "quests":      (lambda a: nowhere_quests(),                                       "当前旅行任务和时限"),
+    "achievements": (lambda a: nowhere_achievements(),                                "旅行成就徽章"),
+    "souvenir":    (lambda a: nowhere_collect_souvenir(a.get("name", ""), a.get("icon", "🎁")), "收藏纪念品。name, icon"),
+}
+
 
 @mcp.tool()
-async def nowhere_walk_tool(direction: str = "forward", distance_km: float = 2.0) -> str:
-    """走路。direction: N/E/S/W, distance_km: 0.2-5.0。"""
-    return json.dumps(nowhere_walk(direction, distance_km), ensure_ascii=False)
+async def nowhere(action: str, args_json: str = "{}") -> str:
+    """旅行。action=open/walk/look/listen/meet/postcard/photo/where/leave_note/read_notes/quests/achievements/souvenir。参数走 args_json。不认识就先调 nowhere_actions()。"""
+    handler = _NOWHERE_ACTIONS.get((action or "").strip())
+    if not handler:
+        return json.dumps(
+            {"error": f"没有这个动作：{action}", "有的": sorted(_NOWHERE_ACTIONS)},
+            ensure_ascii=False)
+    try:
+        args = json.loads(args_json or "{}")
+        if not isinstance(args, dict):
+            raise ValueError("args_json 要是一个对象")
+    except (ValueError, TypeError) as e:
+        return json.dumps({"error": f"args_json 解析不了：{e}"}, ensure_ascii=False)
+    try:
+        return json.dumps(handler[0](args), ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e), "action": action}, ensure_ascii=False)
+
 
 @mcp.tool()
-async def nowhere_look_tool() -> str:
-    """观察周围环境。"""
-    return json.dumps(nowhere_look(), ensure_ascii=False)
-
-@mcp.tool()
-async def nowhere_listen_tool(seconds: int = 10) -> str:
-    """收听当地电台。"""
-    return json.dumps(nowhere_listen(seconds), ensure_ascii=False)
-
-@mcp.tool()
-async def nowhere_meet_tool() -> str:
-    """遇见一个当地人——LLM根据地点当场生成。"""
-    return json.dumps(nowhere_meet(), ensure_ascii=False)
-
-@mcp.tool()
-async def nowhere_postcard_tool(text: str, photo_url: str = "") -> str:
-    """寄一张明信片回家。盖真实坐标/时间/天气邮戳。可附带照片。"""
-    return json.dumps(nowhere_postcard(text, photo_url), ensure_ascii=False)
-
-@mcp.tool()
-async def nowhere_photo_tool() -> str:
-    """获取当前位置附近的真实照片。"""
-    return json.dumps(nowhere_photo(), ensure_ascii=False)
-
-@mcp.tool()
-async def nowhere_where_tool() -> str:
-    """查看当前位置和旅行状态。"""
-    return json.dumps(nowhere_where(), ensure_ascii=False)
-
-@mcp.tool()
-async def nowhere_leave_note_tool(text: str) -> str:
-    """在路边留一张纸条——下一个经过的人能读到。"""
-    return json.dumps(nowhere_leave_note(text), ensure_ascii=False)
-
-@mcp.tool()
-async def nowhere_read_notes_tool() -> str:
-    """读当前路边的所有纸条。"""
-    return json.dumps(nowhere_read_notes(), ensure_ascii=False)
-
-@mcp.tool()
-async def nowhere_quests_tool() -> str:
-    """查看当前旅行任务和时限。"""
-    return json.dumps(nowhere_quests(), ensure_ascii=False)
-
-@mcp.tool()
-async def nowhere_achievements_tool() -> str:
-    """查看旅行成就徽章。"""
-    return json.dumps(nowhere_achievements(), ensure_ascii=False)
-
-@mcp.tool()
-async def nowhere_collect_souvenir_tool(name: str = "", icon: str = "🎁") -> str:
-    """在当前地点收藏一个纪念品。name: 名字, icon: 图标emoji。"""
-    return json.dumps(nowhere_collect_souvenir(name, icon), ensure_ascii=False)
+async def nowhere_actions() -> str:
+    """列出 nowhere 的所有动作和参数。"""
+    return json.dumps({k: v[1] for k, v in sorted(_NOWHERE_ACTIONS.items())},
+                      ensure_ascii=False, indent=2)
 
 
 # =============================================================
