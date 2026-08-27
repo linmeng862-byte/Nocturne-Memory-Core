@@ -6664,6 +6664,21 @@ async def wander(mode: str, query: str = "", limit: int = 12) -> str:
     )
 
 
+@mcp.tool(name="trace")
+async def trace(query: str, limit: int = 15) -> str:
+    """按关键词搜索记忆。"""
+    # Kept as its own tool, not folded into wander(mode="trace"), because
+    # tests/test_public_surface.py names it as part of the advertised
+    # continuity loop. It is a one-line alias, and that is fine: the surface
+    # other people call is a contract, not an implementation detail.
+    # 保留成独立工具而不是并进 wander(mode="trace")：
+    # test_public_surface.py 把它列为对外承诺的连续性回路的一部分。
+    # 它确实只是一行别名——但别人调的那层是契约，不是实现细节。
+    if not (query or "").strip():
+        return "trace 要带 query。它是全量轨迹搜索，不是 Breath 浮现。"
+    return await wander(mode="trace", query=query, limit=limit)
+
+
 @mcp.tool()
 async def wander_mark(bucket_id: str, mark: str, note: str = "",
                       actor: str = "", endpoint: str = "") -> str:
