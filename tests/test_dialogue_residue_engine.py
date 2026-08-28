@@ -2,6 +2,7 @@ from dialogue_residue_engine import (
     normalize_dialogue_messages,
     normalize_dialogue_residue_event,
 )
+from identity import AGENT_NAME
 
 
 def test_normalize_dialogue_messages_keeps_last_two_by_two_shape():
@@ -18,7 +19,7 @@ def test_normalize_dialogue_messages_keeps_last_two_by_two_shape():
 
     assert [m["role"] for m in messages] == ["user", "assistant", "user", "assistant"]
     assert messages[0]["text"] == "Human一句"
-    assert messages[-1]["speaker"] == "Agent"
+    assert messages[-1]["speaker"] == AGENT_NAME
 
 
 def test_normalize_dialogue_messages_preserves_focus_pair():
