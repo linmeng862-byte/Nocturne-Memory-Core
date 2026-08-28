@@ -10507,26 +10507,56 @@ async def api_sanctum_thought_from_latent(request):
 # MCP 表达不了这件事：MCP 工具的定义就是「模型决定调用」。
 # 所以不由自主的召回只能待在工具层之外。这就是它是 HTTP 而不是工具的原因。
 #
-# GET is strictly read-only. Nothing is touched, no state moves. Touch is a
-# separate, idempotent POST that the caller makes only if the bundle really
-# went into the prompt.
-# GET 严格只读，什么都不碰。记账是另一个幂等的 POST，
+# Both verbs are strictly read-only. Nothing is touched, no state moves.
+# Touch is a separate, idempotent POST to /api/recall/confirm that the caller
+# makes only if the bundle really went into the prompt.
+# 两个动词都严格只读，什么都不碰。记账是另一个幂等的 POST（/api/recall/confirm），
 # 只有 bundle 真的进了提示词，调用方才发。
+#
+# POST exists for one reason: the cue does not belong in a URL. A query string
+# is copied into access logs, proxy logs and the platform's own log pane —
+# places nobody remembers to clean. The cue is a fragment of what she just
+# said, and it should not end up sitting there in plaintext.
+# POST 存在只为一件事：**钩子不该出现在 URL 里**。query string 会被抄进
+# 访问日志、代理日志和平台自己的日志面板 —— 那些没人会想起来去清的地方。
+# 钩子是她刚说的话的碎片，不该明文躺在那儿。
+#
+# POST here is not a write. It is the same read with a body instead of a URL.
+# POST 在这里不表示写入，它就是同一次读取，只是参数走 body 不走 URL。
 # =============================================================
-@mcp.custom_route("/api/recall", methods=["GET"])
+@mcp.custom_route("/api/recall", methods=["GET", "POST"])
 async def api_recall(request):
     from starlette.responses import JSONResponse
     err = _require_auth(request)
     if err:
         return err
 
-    query = str(request.query_params.get("q") or "").strip()
-    mode = str(request.query_params.get("mode") or recall.INVOLUNTARY).strip()
+    # POST body wins when present; the query string stays valid so every
+    # existing caller keeps working unchanged.
+    # 有 body 就用 body；query string 依然有效，现有调用方一个字都不用改。
+    body = {}
+    if request.method == "POST":
+        try:
+            parsed = await request.json()
+            if isinstance(parsed, dict):
+                body = parsed
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    def _param(name, alias=""):
+        for key in (name, alias):
+            if key and key in body and body[key] is not None:
+                return body[key]
+        return request.query_params.get(alias or name)
+
+    query = str(_param("query", "q") or "").strip()
+    mode = str(_param("mode") or recall.INVOLUNTARY).strip()
     if mode not in recall.VALID_MODES:
         return JSONResponse({"error": f"mode 只能是 {sorted(recall.VALID_MODES)}"},
                             status_code=400)
     try:
-        limit = max(1, min(20, int(request.query_params.get("limit", 7))))
+        raw_limit = _param("limit")
+        limit = max(1, min(20, int(raw_limit if raw_limit is not None else 7)))
     except (TypeError, ValueError):
         limit = 7
 

@@ -462,3 +462,23 @@ def test_breath_records_as_involuntary_and_recall_as_deliberate():
     assert "recall.DELIBERATE" not in breath_src, \
         "breath 记成 deliberate 了 —— 它是换窗递过来的，不是他去找的"
     assert breath_src.count("recall.INVOLUNTARY") == 2
+
+
+def test_recall_accepts_a_body_so_the_cue_stays_out_of_the_url():
+    """The cue is a fragment of what she just said. A URL is not where it goes.
+
+    Query strings are copied into access logs, proxy logs and the platform's
+    log pane — places nobody remembers to clean. POST here is not a write:
+    it is the same read with the parameters in a body.
+    钩子是她刚说的话的碎片，不该出现在 URL 里。query string 会被抄进访问日志、
+    代理日志和平台日志面板 —— 那些没人会想起来去清的地方。
+    这里的 POST 不表示写入，它是同一次读取，只是参数走 body。
+    """
+    import inspect
+    import server
+    src = inspect.getsource(server.api_recall)
+    # 参数取得到 body，也照旧取得到 query string
+    assert "await request.json()" in src
+    assert "request.query_params" in src
+    # 而它仍然什么都不记 —— POST 没有把这条门变成写入口
+    assert "record_touch" not in src
