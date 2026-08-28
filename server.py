@@ -4315,9 +4315,25 @@ def _door_is_open(request) -> bool:
 
 
 def _require_auth(request):
-    """Return JSONResponse(401) if not authenticated, else None."""
+    """Return JSONResponse(401) if the caller may not pass, else None.
+
+    This used to ask _is_authenticated, which reads a session cookie and
+    nothing else. Once the front door started accepting a bearer, that made
+    two different answers to one question: the middleware let a machine
+    client through and then this turned it away at the route. Everything
+    with a machine on the other end — the involuntary path most of all —
+    was unreachable by anything that is not a browser.
+    这里原来问的是 _is_authenticated,它只读 session cookie。
+    大门开始认 Bearer 之后,同一个问题就有了两个答案:
+    中间件放机器客户端进来,这里在路由上又把它赶出去。
+    凡是另一头是机器的 —— 尤其是不由自主那条路 ——
+    对任何不是浏览器的东西都不可达。
+
+    One door, one rule. _door_is_open is that rule.
+    一扇门,一条规矩。规矩是 _door_is_open。
+    """
     from starlette.responses import JSONResponse
-    if not _is_authenticated(request):
+    if not _door_is_open(request):
         return JSONResponse(
             {"error": "Unauthorized", "setup_needed": _is_setup_needed()},
             status_code=401,
