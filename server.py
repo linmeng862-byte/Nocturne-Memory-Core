@@ -5173,7 +5173,10 @@ async def breath() -> str:
                 recall_journal.record_touch(
                     config["buckets_dir"],
                     recall_id=uuid.uuid4().hex[:16],
-                    mode=recall.DELIBERATE,
+                    # breath 是「新窗或 Compact 后」递到他手上的,不是他想起来要去找的
+                    # —— 触发它的是换窗,不是他的意图。记成 deliberate 会把整本账染歪,
+                    # 而 breath 是高频的。见 recall.py 顶部对两种召回的定义。
+                    mode=recall.INVOLUNTARY,
                     bucket_ids=_surfaced_ids,
                     endpoint="mcp:breath",
                 )
@@ -5342,7 +5345,8 @@ async def breath() -> str:
             recall_journal.record_touch(
                 config["buckets_dir"],
                 recall_id=uuid.uuid4().hex[:16],
-                mode=recall.DELIBERATE,
+                # 同上：breath 递过来的东西不是他找来的。
+                mode=recall.INVOLUNTARY,
                 bucket_ids=[b["id"] for b in candidates] + [f["id"] for f in selected_feels],
                 endpoint="mcp:breath",
             )
