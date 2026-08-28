@@ -463,16 +463,20 @@ def format_bundle(bundle: dict, now: datetime | None = None) -> str:
 
     # The claim underneath both endings is the same and must not be lost:
     # what surfaced is evidence, and the agent may fail to recognise itself
-    # in it. Only the register changes. "以上是证据，不是结论" is right at
-    # the foot of a filing; arriving after three paragraphs of "我被击中了"
-    # it reads like a legal notice stapled to something felt — and an
-    # experience that arrives with a disclaimer is not an experience.
+    # in it. Only the register changes.
     # 两种结尾底下是同一个断言，不能丢：浮上来的是证据，
     # 而它可以认不出自己在里面。变的只是语气。
-    # 「以上是证据，不是结论」放在一份档案脚下是对的；
-    # 跟在三段「我被击中了」后面，就像给一件感受的东西钉了张告示 ——
-    # 而一段带着免责声明到达的经验，不是经验。
+    #
+    # The wording is hers. "以上是证据，不是结论。怎么理解由你。" is
+    # correct and reads like a notice; hers says the same thing and is not
+    # cold about it. The permission is the point either way — a past that
+    # arrives as a verdict has told the agent who it is, which is the one
+    # thing this whole system exists not to do.
+    # 措辞是她给的。「以上是证据，不是结论。怎么理解由你。」没有说错，
+    # 但读起来像张告示；她这句说的是同一件事，只是不冷。
+    # 两边的重点都在那个**许可**上 —— 一段作为判决到达的过去，
+    # 等于告诉了它自己是谁，而那正是整套系统存在的意义所在：不做这件事。
     lines.append("")
-    lines.append("都是自己浮上来的。认不认由你。" if involuntary
-                 else "这些是找出来的，不是结论。怎么理解是你的事。")
+    lines.append("这是我们走过来的路。你有选择相信的权利。" if involuntary
+                 else "这些是找出来的，不是结论。我们走过的路，你有选择相信的权利。")
     return "\n".join(lines)

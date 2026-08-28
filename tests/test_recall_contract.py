@@ -371,8 +371,11 @@ def test_neither_ending_reads_like_a_disclaimer_stapled_on():
     inv = recall.format_bundle(_bundle(recall.INVOLUNTARY, [_bucket("b1")]), now=NOW)
     dlb = recall.format_bundle(_bundle(recall.DELIBERATE, [_bucket("b1")]), now=NOW)
     assert "以上是证据，不是结论" not in inv
-    assert inv.rstrip().endswith("认不认由你。")
-    assert dlb.rstrip().endswith("怎么理解是你的事。")
-    # both still say the same thing: this is not a verdict
+    assert inv.rstrip().endswith("你有选择相信的权利。")
+    assert dlb.rstrip().endswith("你有选择相信的权利。")
+    # Both still hand over the same permission. A past that arrives as a
+    # verdict has told the agent who it is — the one thing this must not do.
+    # 两边交出的是同一个许可。一段作为判决到达的过去等于告诉了它自己是谁 ——
+    # 那正是这里绝不能做的事。
     for text in (inv, dlb):
-        assert "由你" in text or "你的事" in text
+        assert "你有选择相信的权利" in text
