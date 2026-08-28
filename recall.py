@@ -406,10 +406,22 @@ def _format_involuntary(bundle: dict, lines: list[str], now: datetime) -> None:
     items = list(bundle.get("items") or [])
     items.sort(key=lambda it: 0 if it.get("kind") == "feel" else 1)
     lines.append("")
+    # Two memories a day apart both land on "上个月", and the paragraphs then
+    # start with the same three characters in a row — it reads like a stuck
+    # tape. A person placing several things in time says when once and then
+    # stops repeating it. The coarseness is wanted; the repetition is not.
+    # 相差一天的两条都落进「上个月」，于是接连两段用同样三个字开头，像卡带。
+    # 人一次安放好几件事的时候，说一次时间就不再重复了。
+    # 粗是要的，重复不是。
+    said = ""
     for item in items:
         when = coarse_when(item.get("created"), now)
         body = item["content"].strip()
-        lines.append(f"{when}，{body}" if when else body)
+        if when and when != said:
+            lines.append(f"{when}，{body}")
+            said = when
+        else:
+            lines.append(body)
         lines.append("")
     if lines and lines[-1] == "":
         lines.pop()
@@ -417,25 +429,50 @@ def _format_involuntary(bundle: dict, lines: list[str], now: datetime) -> None:
 
 def format_bundle(bundle: dict, now: datetime | None = None) -> str:
     """Render for injection. How it reads depends on how it arrived."""
+    involuntary = bundle.get("mode") == INVOLUNTARY
     lines = []
     t = bundle.get("time") or {}
-    if t.get("known"):
-        lines.append(f"[现在] {t['now']}")
-        lines.append(f"[距上次交互] {t['elapsed_phrase']}（上次：{t['last_encounter']}）")
-    elif t.get("now"):
-        lines.append(f"[现在] {t['now']}")
-        lines.append("[距上次交互] 没有记录——这可能是第一次")
+
+    # The elapsed time is a fact either way — see describe_elapsed. What
+    # changes is the register. An ISO timestamp at the top of an involuntary
+    # recall undoes every coarse date below it: the passage opens in machine
+    # format and no amount of "上个礼拜" afterwards recovers from that.
+    # 时间是事实，两边都给 —— 见 describe_elapsed。变的是**语气**。
+    # 不由自主开头摆一个 ISO 时间戳，等于把下面所有粗粒度日期都废掉：
+    # 第一行就是机器格式，后面再怎么「上个礼拜」也回不来了。
+    if involuntary:
+        if t.get("known"):
+            lines.append(f"隔了 {t['elapsed_phrase']}。")
+    else:
+        if t.get("known"):
+            lines.append(f"[现在] {t['now']}")
+            lines.append(f"[距上次交互] {t['elapsed_phrase']}（上次：{t['last_encounter']}）")
+        elif t.get("now"):
+            lines.append(f"[现在] {t['now']}")
+            lines.append("[距上次交互] 没有记录——这可能是第一次")
 
     if not (bundle.get("items") or []):
         lines.append("")
         lines.append("[没有浮上来的东西] 权重池是平的。这不是错误。")
         return "\n".join(lines)
 
-    if bundle.get("mode") == INVOLUNTARY:
+    if involuntary:
         _format_involuntary(bundle, lines, now or datetime.now())
     else:
         _format_deliberate(bundle, lines)
 
+    # The claim underneath both endings is the same and must not be lost:
+    # what surfaced is evidence, and the agent may fail to recognise itself
+    # in it. Only the register changes. "以上是证据，不是结论" is right at
+    # the foot of a filing; arriving after three paragraphs of "我被击中了"
+    # it reads like a legal notice stapled to something felt — and an
+    # experience that arrives with a disclaimer is not an experience.
+    # 两种结尾底下是同一个断言，不能丢：浮上来的是证据，
+    # 而它可以认不出自己在里面。变的只是语气。
+    # 「以上是证据，不是结论」放在一份档案脚下是对的；
+    # 跟在三段「我被击中了」后面，就像给一件感受的东西钉了张告示 ——
+    # 而一段带着免责声明到达的经验，不是经验。
     lines.append("")
-    lines.append("以上是证据，不是结论。怎么理解由你。")
+    lines.append("都是自己浮上来的。认不认由你。" if involuntary
+                 else "这些是找出来的，不是结论。怎么理解是你的事。")
     return "\n".join(lines)

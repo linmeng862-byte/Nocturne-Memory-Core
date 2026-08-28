@@ -314,3 +314,65 @@ def test_read_only_claim_survives_both_renderings():
         b = _bundle(mode, [_bucket("b1")])
         recall.format_bundle(b, now=NOW)
         assert b["read_only"] == {"wrote_anything": False, "touch_recorded": False}
+
+
+# ---------------------------------------------------------
+# 4. The involuntary rendering has to sound like one, all the way down
+# ---------------------------------------------------------
+
+def test_involuntary_header_is_not_a_timestamp():
+    """An ISO timestamp on line one undoes every coarse date below it."""
+    b = recall.build_bundle(
+        recall.select([_bucket("b1")], NOW, limit=1),
+        recall.describe_elapsed((NOW - timedelta(minutes=50)).isoformat(), NOW),
+        recall.INVOLUNTARY, recall_id="r1")
+    text = recall.format_bundle(b, now=NOW)
+    assert "[现在]" not in text
+    assert NOW.isoformat(timespec="seconds") not in text
+    assert "50 分钟" in text, "过去了多久是事实，不能因为换语气就丢掉"
+
+
+def test_deliberate_header_keeps_the_exact_clock():
+    b = recall.build_bundle(
+        recall.select([_bucket("b1")], NOW, limit=1),
+        recall.describe_elapsed((NOW - timedelta(minutes=50)).isoformat(), NOW),
+        recall.DELIBERATE, recall_id="r1")
+    assert "[现在]" in recall.format_bundle(b, now=NOW)
+
+
+def test_adjacent_repeats_say_when_only_once():
+    """Two memories a day apart both land on the same phrase; starting two
+    paragraphs with the same three characters reads like a stuck tape."""
+    b = recall.build_bundle(
+        recall.select([
+            _bucket("a", content="第一件", created=NOW - timedelta(days=40)),
+            _bucket("b", content="第二件", created=NOW - timedelta(days=41)),
+        ], NOW, limit=2),
+        recall.describe_elapsed("", NOW), recall.INVOLUNTARY, recall_id="r1")
+    text = recall.format_bundle(b, now=NOW)
+    assert text.count("上个月") == 1, f"时间词重复了：\n{text}"
+    assert "第一件" in text and "第二件" in text
+
+
+def test_a_new_time_phrase_is_still_spoken():
+    """Suppressing repeats must not suppress an actual change of era."""
+    b = recall.build_bundle(
+        recall.select([
+            _bucket("a", content="近的", created=NOW),
+            _bucket("b", content="远的", created=NOW - timedelta(days=200)),
+        ], NOW, limit=2),
+        recall.describe_elapsed("", NOW), recall.INVOLUNTARY, recall_id="r1")
+    text = recall.format_bundle(b, now=NOW)
+    assert "今天" in text and "大半年前" in text
+
+
+def test_neither_ending_reads_like_a_disclaimer_stapled_on():
+    """The claim survives in both; only the register changes."""
+    inv = recall.format_bundle(_bundle(recall.INVOLUNTARY, [_bucket("b1")]), now=NOW)
+    dlb = recall.format_bundle(_bundle(recall.DELIBERATE, [_bucket("b1")]), now=NOW)
+    assert "以上是证据，不是结论" not in inv
+    assert inv.rstrip().endswith("认不认由你。")
+    assert dlb.rstrip().endswith("怎么理解是你的事。")
+    # both still say the same thing: this is not a verdict
+    for text in (inv, dlb):
+        assert "由你" in text or "你的事" in text
