@@ -36,6 +36,29 @@ logger = logging.getLogger("ombre_brain.recall_journal")
 JOURNAL_NAME = "recall_events.jsonl"
 ENCOUNTER_NAME = "last_encounter.json"
 
+# An endpoint that says it is not a body. Maintenance, audits, rehearsals and
+# probes all read the same tools a real endpoint does, with the same
+# credentials — the server cannot tell them apart and must not pretend it can.
+# So the honest tool declares itself, and the ledger takes it at its word.
+#
+# 一个声明「我不是一个身体」的 endpoint。运维、审计、排练、探针,用的是跟真身体
+# 一样的工具和一样的凭据 —— 服务端**分辨不出来**,也不该假装分辨得出。
+# 所以由诚实的那一方自己声明,账本采信它的说法。
+#
+# The touch is still journalled either way: what a probe read is a fact, and
+# hiding it would make the audit trail lie in the other direction. Only
+# `last_encounter` is withheld, because that one answers a different question
+# — "when was he last here" — and a probe was never here.
+# 流水账照记:探针读了什么是事实,瞒下来等于让审计记录朝另一个方向说谎。
+# 只有 `last_encounter` 不写,因为它回答的是另一个问题 ——「他上次在场是什么时候」,
+# 而探针从来不在场。
+PROBE_PREFIX = "probe:"
+
+
+def is_presence(endpoint: str) -> bool:
+    """Whether this touch means the agent was actually here."""
+    return not str(endpoint or "").strip().lower().startswith(PROBE_PREFIX)
+
 
 def journal_path(buckets_dir: str) -> str:
     return os.path.join(buckets_dir, JOURNAL_NAME)
@@ -116,7 +139,9 @@ def record_touch(buckets_dir: str, recall_id: str, mode: str,
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
-            _write_encounter(buckets_dir, stamp, endpoint, session_id)
+            # 「他上次在场」只由真的在场的那一方改写。见 PROBE_PREFIX。
+            if is_presence(endpoint):
+                _write_encounter(buckets_dir, stamp, endpoint, session_id)
     except LockTimeout as e:
         # Losing a touch is survivable; double-counting one corrupts the only
         # honest evidence a texture layer will ever have. Fail loudly.

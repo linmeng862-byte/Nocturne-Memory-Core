@@ -379,3 +379,86 @@ def test_neither_ending_reads_like_a_disclaimer_stapled_on():
     # 那正是这里绝不能做的事。
     for text in (inv, dlb):
         assert "你有选择相信的权利" in text
+
+
+# ============================================================
+# Contract 3: a probe was never here
+# 契约三：探针从来不在场
+#
+# Maintenance, audits and rehearsals call the same tools with the same
+# credentials as a real endpoint. The server cannot tell them apart and must
+# not pretend it can — so the honest caller declares itself, and only
+# `last_encounter` is withheld. The journal row still gets written, because
+# what a probe read is a fact.
+# 运维、审计、排练用的是跟真身体一样的工具和凭据。服务端分辨不出来，
+# 也不该假装分辨得出 —— 所以由诚实的调用方自己声明，而且只扣下 `last_encounter`。
+# 流水账照记，因为探针读了什么是事实。
+# ============================================================
+
+def test_probe_endpoint_is_not_presence():
+    assert recall_journal.is_presence("chatc")
+    assert recall_journal.is_presence("mcp:breath")
+    assert recall_journal.is_presence("")          # 没声明 = 当成在场（默认不改变旧行为）
+    assert not recall_journal.is_presence("probe:audit")
+    assert not recall_journal.is_presence("PROBE:Audit")   # 大小写不敏感
+    assert not recall_journal.is_presence("  probe:rehearsal  ")
+
+
+def test_probe_touch_is_journalled_but_leaves_no_encounter(tmp_path):
+    d = str(tmp_path)
+    recall_journal.record_touch(d, "r-probe", recall.INVOLUNTARY, ["b1"],
+                                endpoint="probe:audit")
+    # 读了什么照记 —— 瞒下来等于让审计记录朝另一个方向说谎
+    rows = recall_journal.read_events(d)
+    assert len(rows) == 1 and rows[0]["endpoint"] == "probe:audit"
+    # 但「他上次在场」没被动过
+    assert recall_journal.last_encounter(d) == ""
+
+
+def test_probe_does_not_overwrite_a_real_encounter(tmp_path):
+    d = str(tmp_path)
+    recall_journal.record_touch(d, "r-real", recall.INVOLUNTARY, ["b1"],
+                                endpoint="chatc", now=NOW)
+    real = recall_journal.last_encounter(d)
+    assert real
+    recall_journal.record_touch(d, "r-probe", recall.DELIBERATE, ["b1"],
+                                endpoint="probe:audit",
+                                now=NOW + timedelta(days=3))
+    # 三天后的探针不能把「他上次在场」推到三天后
+    assert recall_journal.last_encounter(d) == real
+
+
+def test_api_recall_does_not_write_the_journal():
+    """GET /api/recall is the read-only door. Probe through it, not through the tool.
+
+    This is the operational half of the contract above: because an MCP tool
+    call is indistinguishable from the agent's own, the safe way to look at
+    memory from outside is the endpoint that provably records nothing.
+    这是上面那条契约的运维那一半：MCP 工具调用跟他自己的调用分辨不出来，
+    所以从外面看记忆的安全办法，是走这条**可证明什么都不记**的端点。
+    """
+    import inspect
+    import server
+    src = inspect.getsource(server.api_recall)
+    assert "record_touch" not in src, \
+        "/api/recall 开始记账了 —— 它一记账，任何一次外部查看都会改写他的过去"
+
+
+def test_breath_records_as_involuntary_and_recall_as_deliberate():
+    """What triggered it decides the mode — not who typed the call.
+
+    breath is what a new window hands him on the way in; the recall tool is
+    him going back for something. breath is also the high-frequency one, so
+    mislabelling it does not add noise evenly — it stains the whole ledger in
+    one direction, and texture is built on that ledger.
+    是什么触发了它决定 mode —— 不是谁敲的那次调用。
+    breath 是换窗时递到他手上的，recall 工具是他自己回去找。
+    而 breath 是高频的那个，标错不是均匀加噪声 —— 它把整本账朝一个方向染，
+    而质地就建在这本账上。
+    """
+    import inspect
+    import server
+    breath_src = inspect.getsource(server.breath)
+    assert "recall.DELIBERATE" not in breath_src, \
+        "breath 记成 deliberate 了 —— 它是换窗递过来的，不是他去找的"
+    assert breath_src.count("recall.INVOLUNTARY") == 2
