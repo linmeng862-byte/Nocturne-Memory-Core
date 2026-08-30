@@ -4758,9 +4758,17 @@ async def _merge_or_create(
         # --- 不合并到钉选/保护桶 ---
         if not (bucket["metadata"].get("pinned") or bucket["metadata"].get("protected")):
             try:
-                merged = await dehydrator.merge(bucket["content"], content)
                 old_v = bucket["metadata"].get("valence", 0.5)
                 old_a = bucket["metadata"].get("arousal", 0.3)
+                # 取新旧**较大**的唤醒度，不取平均：一条烈的记忆被一条平缓的
+                # 合进来，它不会因此变得不烈 —— 但取平均会让它掉出高唤醒档，
+                # 那句该留原话的话就被概括掉了。合并是不可逆的，宁可多留。
+                try:
+                    _merge_arousal = max(float(old_a), float(arousal))
+                except (TypeError, ValueError):
+                    _merge_arousal = None
+                merged = await dehydrator.merge(bucket["content"], content,
+                                                arousal=_merge_arousal)
                 merged_valence = round((old_v + valence) / 2, 2)
                 merged_arousal = round((old_a + arousal) / 2, 2)
                 updates = {

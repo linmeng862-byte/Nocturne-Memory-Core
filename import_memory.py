@@ -672,10 +672,16 @@ class ImportEngine:
             bucket = existing[0]
             if not (bucket["metadata"].get("pinned") or bucket["metadata"].get("protected")):
                 try:
-                    merged = await self.dehydrator.merge(bucket["content"], content)
-                    self.state.data["api_calls"] += 1
                     old_v = bucket["metadata"].get("valence", 0.5)
                     old_a = bucket["metadata"].get("arousal", 0.3)
+                    # 跟 server.py 那处同一个规矩：取较大的唤醒度，不取平均。
+                    try:
+                        _merge_arousal = max(float(old_a), float(arousal))
+                    except (TypeError, ValueError):
+                        _merge_arousal = None
+                    merged = await self.dehydrator.merge(bucket["content"], content,
+                                                         arousal=_merge_arousal)
+                    self.state.data["api_calls"] += 1
                     await self.bucket_mgr.update(
                         bucket["id"],
                         content=merged,

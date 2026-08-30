@@ -117,6 +117,43 @@ MERGE_PROMPT = """你是一个信息合并专家。请将旧记忆与新内容�
 直接输出合并后的文本，不要加额外说明。"""
 
 
+# --- Kensinger 的情绪权衡：唤醒度高时，中心细节记得更牢，边缘细节反而更差 ---
+#
+# 合并到今天为止是**均匀降分辨率**：不管这条记忆当时多烈，一视同仁地压。
+# 但人不是这么忘的。情绪唤醒会让**中心细节**（那句话、那个动作、当时的感受）
+# 记得更牢，同时让**边缘细节**（周围有什么、几点、顺带聊过什么）掉得更快。
+# 均匀压缩的结果是：最该留原话的地方被概括成了「她表达了在乎」。
+#
+# ⚠️ 这是**提示词**层面的改动，效果不确定、也没法单测输出质量。
+#    能测的只有「哪种唤醒度拿到哪段话」。别把它当成有保证的行为。
+# ⚠️ 高唤醒**不放宽长度上限** —— 不然烈的记忆会无限膨胀。
+#    Kensinger 说的是「留中心、丢边缘」，不是「留得更多」，这是一次**再分配**。
+_RETENTION_HIGH = """
+
+⚠️ 这是一条情绪很烈的记忆。请做**不均匀**的取舍，总长度上限不变：
+- 最动情的那一两句**保留原话**，一个字都不要改写、不要概括
+- 具体的动作、称呼、语气词是中心细节，优先留
+- 时间地点、周边琐事、顺带提过的话题是边缘细节，可以大幅压掉甚至删去
+宁可完整保留一句原话，也不要把三件事都概括成一句。"""
+
+_RETENTION_LOW = """
+
+这是一条情绪平缓的记忆，按常规均匀压缩即可。"""
+
+
+def _retention_clause(arousal) -> str:
+    """按唤醒度选一段取舍指示。取不到值就当平缓 —— 不猜。"""
+    try:
+        a = float(arousal)
+    except (TypeError, ValueError):
+        return ""
+    if a >= 0.6:
+        return _RETENTION_HIGH
+    if a < 0.35:
+        return _RETENTION_LOW
+    return ""
+
+
 # --- Auto-tagging prompt: analyze content for domain and emotion coords ---
 # --- 自动打标提示词：分析内容的主题域和情感坐标 ---
 ANALYZE_PROMPT = """你是一个内容分析器。请分析以下文本，输出结构化的元数据。
@@ -262,10 +299,14 @@ class Dehydrator:
     # Merge: blend new content into existing bucket
     # 合并：将新内容揉入已有桶，保持体积恒定
     # ---------------------------------------------------------
-    async def merge(self, old_content: str, new_content: str) -> str:
+    async def merge(self, old_content: str, new_content: str,
+                    arousal=None) -> str:
         """
         Merge new content with old memory, preventing infinite bucket growth.
         将新内容与旧记忆合并，避免桶无限膨胀。
+
+        `arousal`：这条记忆有多烈。烈的记忆走不均匀取舍——中心细节留原话，
+        边缘细节大幅压掉（Kensinger 的情绪权衡）。传不了就走常规均匀压缩。
         """
         if not old_content and not new_content:
             return ""
@@ -278,7 +319,7 @@ class Dehydrator:
         if not self.api_available:
             raise RuntimeError("脱水 API 不可用，请检查 config.yaml 中的 dehydration 配置")
         try:
-            result = await self._api_merge(old_content, new_content)
+            result = await self._api_merge(old_content, new_content, arousal)
             if result:
                 return result
             raise RuntimeError("API 合并返回空结果")
@@ -313,7 +354,8 @@ class Dehydrator:
     # API call: merge
     # API 调用：合并
     # ---------------------------------------------------------
-    async def _api_merge(self, old_content: str, new_content: str) -> str:
+    async def _api_merge(self, old_content: str, new_content: str,
+                         arousal=None) -> str:
         """
         Call LLM API for intelligent merge (via OpenAI-compatible client).
         调用 LLM API 执行智能合并。
@@ -322,7 +364,7 @@ class Dehydrator:
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": MERGE_PROMPT},
+                {"role": "system", "content": MERGE_PROMPT + _retention_clause(arousal)},
                 {"role": "user", "content": user_msg},
             ],
             max_tokens=self.max_tokens,
