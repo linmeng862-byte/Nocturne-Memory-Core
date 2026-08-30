@@ -54,10 +54,17 @@ PROMPT = (
 
 
 def _buckets_dir(override):
+    """默认扫**整个** buckets 目录，不只是 dynamic/。
+
+    ⚠️ 08-30 实跑踩过：原来默认只扫 `dynamic/`，结果 88 个里只找到 1 个要补的，
+    差点让人以为坐标本来就是全的。实际上磁盘上有 113 个 `valence: 0.5`，
+    绝大多数在 `dynamic/` **外面** —— feel 类型 24 个、归档的一批。
+    而 feel 恰恰是情绪最相关的那批，衰减和褪色偏差都在算它们。
+    """
     if override:
         return override
     from utils import load_config
-    return os.path.join(load_config()["buckets_dir"], "dynamic")
+    return load_config()["buckets_dir"]
 
 
 def _label(fp, post) -> str:
@@ -180,6 +187,12 @@ async def main():
                   f"v={post.metadata.get('valence')} a={post.metadata.get('arousal')}")
         if len(todo) > 40:
             print(f"  …… 还有 {len(todo) - 40} 个")
+        by_dir = {}
+        for fp, _ in todo:
+            by_dir[os.path.dirname(fp)] = by_dir.get(os.path.dirname(fp), 0) + 1
+        print("\n按目录分布（确认没扫到不该扫的地方）：")
+        for k in sorted(by_dir, key=lambda x: -by_dir[x]):
+            print(f"  {by_dir[k]:>4}  {k}")
         print(f"\n会调用模型 {len(todo)} 次。**只改 valence / arousal，别的字段不动。**")
         print("确认没问题就加 --apply。建议先 --limit 5 --apply 看看判得准不准。")
         return
