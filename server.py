@@ -7281,9 +7281,13 @@ async def get_wake_context() -> str:
 
 
 @mcp.tool()
-async def leave_texture(state: str, primary_feeling: str, secondary_feeling: str = "", flavor: str = "", silence: str = "", her_mood: str = "", understanding: str = "", concern: str = "", last_topic: str = "", unresolved: str = "") -> str:
-    """关窗前必须调用。留下感受质地给下一个窗口的自己。"""
-    result = leave_texture_impl(state=state, primary_feeling=primary_feeling, secondary_feeling=secondary_feeling, flavor=flavor, silence=silence, her_mood=her_mood, understanding=understanding, concern=concern, last_topic=last_topic, unresolved=unresolved)
+async def leave_texture(state: str, primary_feeling: str, secondary_feeling: str = "", flavor: str = "", silence: str = "", her_mood: str = "", understanding: str = "", concern: str = "", last_topic: str = "", unresolved: str = "", peak_feeling: str = "", peak_intensity: int = 0, peak_moment: str = "") -> str:
+    """关窗前必须调用。留下感受质地给下一个窗口的自己。
+
+    peak_* 是这一窗里**最烈的那一下**（不是关窗时的感受）。上游能算就传，
+    传不了就空着 —— 见 leave_texture_impl 里对峰终定律那段说明。
+    """
+    result = leave_texture_impl(state=state, primary_feeling=primary_feeling, secondary_feeling=secondary_feeling, flavor=flavor, silence=silence, her_mood=her_mood, understanding=understanding, concern=concern, last_topic=last_topic, unresolved=unresolved, peak_feeling=peak_feeling, peak_intensity=peak_intensity, peak_moment=peak_moment)
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 

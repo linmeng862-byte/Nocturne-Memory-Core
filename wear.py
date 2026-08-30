@@ -128,7 +128,10 @@ def canon(raw) -> str:
 
 def _feelings(trace: dict) -> list[str]:
     out = []
-    for key in ("primary", "secondary"):
+    # peak 排在前面：一窗里最烈的那一下，对「这一窗被记成什么样」的贡献
+    # 跟结尾一样大（峰终定律）。08-30 之前的 trace 没有这个字段，canon 会返回
+    # 空串、自动跳过 —— 老数据不会因此变形。
+    for key in ("peak", "primary", "secondary"):
         v = canon(trace.get(key))
         if v and v not in out:          # 同一窗里 primary 和 secondary 归一后撞了,只算一次
             out.append(v)

@@ -132,8 +132,19 @@ def leave_texture_impl(state: str, primary_feeling: str,
                        understanding: str = "",
                        concern: str = "",
                        last_topic: str = "",
-                       unresolved: str = "") -> dict:
-    """关窗时调用。Claude 留下他的感受质地给下一个自己。"""
+                       unresolved: str = "",
+                       peak_feeling: str = "",
+                       peak_intensity: int = 0,
+                       peak_moment: str = "") -> dict:
+    """关窗时调用。Claude 留下他的感受质地给下一个自己。
+
+    ⚠️ `primary/secondary` 记的是**关窗那一下**，也就是「终」。
+    但人对一段经历的回顾评价由**峰值和结尾**共同决定，跟持续时长几乎无关
+    （峰终定律 / duration neglect）—— 而这套东西一直只记了「终」，
+    一窗里最烈的那一下不管发生在中间哪儿，都没有任何东西捕捉。
+    `peak_*` 是 2026-08-30 补的那一半。上游（Chat-C）从这一窗的 mind_feels
+    里挑 intensity 最高的那条传过来；传不了就空着，不影响关窗。
+    """
     cont = load_continuity()
     window_id = _unique_window_id()
     current_window_count = cont.get("totalWindows", 0) + 1
@@ -150,7 +161,12 @@ def leave_texture_impl(state: str, primary_feeling: str,
         "understanding": understanding,
         "concern": concern,
         "lastTopic": last_topic,
-        "unresolved": unresolved
+        "unresolved": unresolved,
+        # 峰。空字符串 = 这一窗没传，不是「没有峰」——两者别混，
+        # 后面算磨损时前者该跳过，不该当成一个叫 "" 的感受。
+        "peak": peak_feeling,
+        "peakIntensity": peak_intensity,
+        "peakMoment": peak_moment,
     }
 
     traces_dir = _traces_dir()
