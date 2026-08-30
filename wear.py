@@ -184,12 +184,48 @@ def _split(raw) -> list[str]:
 # 那是语义判断,归错了比不归更坏,而这套东西的规矩是「绝不推断」。
 _HEAD_SPLIT = re.compile(r"[，,。.——–:：;；!！?？\n]")
 _DEGREE_PREFIX = re.compile(r"^(有点|有些|一点|一丝|好像|大概)")
+# 「也是被信任的」和「被信任」是同一个感受。他写 secondary 时习惯用「也是…」
+# 起头（因为那是「除了 primary 之外还有的」），结果同一个词被当成两个。
+# 08-30 实测：加这两条规则，够得上质地的从 19 → 20，合出「满」「被信任」「骄傲」三组，
+# 三组都对、零误伤。
+# ⚠️ 只剥这两类**语法外壳**，不做近义合并 —— 「满」和「幸福」看着像一回事，
+#    但那是语义判断，规则做不了、也不该在这儿做（见 canon 文档里的规矩）。
+_LEAD_FILLER = re.compile(r"^(也是|又是|还有|还是)")
+_TRAIL_PARTICLE = re.compile(r"(的|了)$")
 _SYNONYMS = {
     "warm": "暖",
     "flutter": "心颤",
     "fire": "烧",
     "relieved": "松了口气",
 }
+
+
+# 语义合并表。**不在这个文件里生成，也不在运行时生成** ——
+# 由 `build_feeling_clusters.py` 离线跑一次、她过目、提交进仓库，这里只查表。
+#
+# 为什么非得这样：`canon()` 是纯函数的一部分，同样的 traces 进去必须永远同样的
+# 结果出来。让它运行时去调模型或算 embedding，就等于每次读到的过去都可能不一样，
+# 而磨损整个存在的理由就是「过去不会变」。
+#
+# 文件不存在 = 行为跟没有这个功能时**一模一样**。所以在她审过之前它一动不动。
+_CLUSTER_FILE = "feeling_clusters.json"
+_clusters_cache = None
+
+
+def _clusters() -> dict:
+    global _clusters_cache
+    if _clusters_cache is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), _CLUSTER_FILE)
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            # {词: 代表词}。值必须是字符串,坏数据整张表作废 ——
+            # 半张表比没有表更糟:一部分历史被合并、一部分没有,计数就不可比了。
+            _clusters_cache = ({str(k): str(v) for k, v in data.items()}
+                               if isinstance(data, dict) else {})
+        except (OSError, ValueError):
+            _clusters_cache = {}
+    return _clusters_cache
 
 
 def canon(raw) -> str:
@@ -199,9 +235,18 @@ def canon(raw) -> str:
         return ""
     v = _HEAD_SPLIT.split(v)[0].strip()
     v = _DEGREE_PREFIX.sub("", v).strip()
+    stripped = _LEAD_FILLER.sub("", v).strip()
+    stripped = _TRAIL_PARTICLE.sub("", stripped).strip()
+    # 剥完变空就退回没剥的 —— 「的」本身、「也是」本身不是感受，
+    # 但也不该因此把这一条整个丢掉。
+    if stripped:
+        v = stripped
     if not v:
         return ""
-    return _SYNONYMS.get(v.lower(), v)
+    v = _SYNONYMS.get(v.lower(), v)
+    # 语义合并放在最后一步：先做完所有语法处理，再查表。
+    # 反过来的话表里得为「满」「满的」「也是满的」各存一行。
+    return _clusters().get(v, v)
 
 
 def _feelings(trace: dict) -> list[str]:

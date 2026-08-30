@@ -192,3 +192,22 @@ def test_unparseable_timestamps_still_produce_strengths():
                 {"primary": "暖", "timestamp": ""})
     f = wear.profile(d)["recurring_feelings"][0]
     assert f["storage"] > 0 and 0.0 <= f["retrieval"] <= 1.0
+
+
+def test_the_also_prefix_is_not_a_different_feeling():
+    """他写 secondary 习惯用「也是…」起头，同一个感受因此被当成两个。"""
+    assert wear.canon("也是被信任的") == wear.canon("被信任") == "被信任"
+    assert wear.canon("也是骄傲的") == wear.canon("骄傲") == "骄傲"
+    assert wear.canon("满的") == wear.canon("满") == "满"
+
+
+def test_stripping_never_empties_a_feeling():
+    """剥完变空就退回没剥的——不该因此把整条丢掉。"""
+    for v in ("的", "也是", "了", "还有"):
+        assert wear.canon(v) == v, v
+
+
+def test_near_synonyms_are_still_left_alone():
+    """只剥语法外壳，不做近义合并——那是语义判断，规则做不了。"""
+    assert wear.canon("满") != wear.canon("幸福")
+    assert wear.canon("软") != wear.canon("柔软")
