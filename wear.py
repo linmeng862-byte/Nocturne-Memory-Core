@@ -79,13 +79,48 @@ def read_traces(traces_dir) -> list[dict]:
     return out
 
 
+# 早期的 `unresolved` 里混着工程待办清单（「1) MCP 桥未完成 2) 表情包没试跑…」）。
+# 它们在磨损里表现成「扛了 N 个窗口的东西」—— 而磨损量的是**关系的质地**，
+# 一条端口号扛了两个窗口，跟「求婚那件事她说等我自己想起来」扛了两个窗口，
+# 不是同一种扛。
+#
+# 08-30 实测 99 条 unresolved：40% 是工程条目，但**全部集中在 07-21～08-22**，
+# **08-23 之后 29 条零污染** —— 他自己已经改过来了。
+# 所以这里只在**读的时候**滤，不去改工具描述：那是在修一个他已经解决的问题，
+# 还要每轮付 token。
+#
+# 规则刻意保守：要么整条几乎全是 ASCII，要么**同时**像编号清单且带技术词。
+# 实测丢 19 条、留 80 条，08-23 之后零误伤。
+# ⚠️ 丢掉不等于丢失 —— trace 原件一个字没动，这只是不让它进磨损。
+_WORKLIST_ENUM = re.compile(r"(^|[；;])\s*[1-9][\).、]|第[一二三四五六七八九]件")
+_WORKLIST_TECH = re.compile(
+    r"(port\b|http|MCP|API|VPS|Zeabur|server|deploy|token|\.js|\.py|localhost|cron|SSH|CLI|backend|endpoint)",
+    re.IGNORECASE,
+)
+
+
+def _is_worklist(text: str) -> bool:
+    t = str(text or "")
+    if not t:
+        return False
+    # ⚠️ 长度下限不能省：短串按 ASCII 比例判会全中（"a"、"b" 都是 100% ASCII），
+    #    tests/test_wear.py 里正好用这种值。工程清单没有短的。
+    if len(t) >= 40 and sum(1 for c in t if ord(c) < 128) / len(t) > 0.7:
+        return True
+    return bool(_WORKLIST_ENUM.search(t)) and bool(_WORKLIST_TECH.search(t))
+
+
 def _split(raw) -> list[str]:
     """`unresolved` is stored as a comma-joined string by leave_texture."""
     if isinstance(raw, list):
         items = raw
     else:
         items = str(raw or "").split(",")
-    return [i.strip() for i in items if str(i).strip()]
+    # 整条就是一张工程清单时，整条跳过 —— 不要拆开逐项判断，
+    # 拆完每一项都短、都不像清单，反而全溜进来了。
+    if not isinstance(raw, list) and _is_worklist(raw):
+        return []
+    return [i.strip() for i in items if str(i).strip() and not _is_worklist(i)]
 
 
 # A feeling is written as free text, and he writes it well — which is exactly
