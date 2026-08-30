@@ -44,25 +44,41 @@ import wear
 
 OUT_NAME = "feeling_clusters.json"
 
-# 一次给模型看多少个词。太多它会敷衍、也更容易在推理里耗光 token；
-# 太少又会切断本该同族的词。
-# 08-30 实跑：60 个词 + 2048 token 两批全失败（content 回空）。降到 35。
-BATCH = 35
+# 一次给模型看多少个词。
+# 08-30 实跑三次才调对：60 个词全失败、35 个还是失败 ——
+# 失败的样子是模型在吐英文思维链（"We need answer in Chinese JSON..."）
+# 然后被截断，JSON 一个字都还没开始写。
+# 这是推理型模型：**任务越大、提示词越长，它推理越久**。加预算是治标，
+# 治本是把任务变小、把输出变简单。
+BATCH = 12
 
+# 输出**不要 JSON**。让推理模型产出结构化 JSON 会让它先想「格式怎么写」，
+# 而那恰恰是它最容易耗光预算的地方。一行一组、冒号分隔，
+# 解析比 JSON 简单，也没有括号配对可以出错。
 PROMPT = (
-    "下面是一个人在不同时刻写下的「感受」词，来自同一段关系的记录。\n"
-    "请把**说的是同一种感受**的词归到一组，并给每组起一个最简短的代表词。\n\n"
-    "归组标准：\n"
-    "  · 同一种感受的不同写法 → 同一组（例：满 / 满的 / 被填满了 / 被装满的）\n"
-    "  · 只是程度或修饰不同 → 同一组（例：暖 / 温暖）\n"
-    "  · 感受**不一样**就分开，哪怕都是正面的\n"
-    "    （例：「满足」和「骄傲」是两种感受，不要合）\n"
-    "    （例：「踏实」和「兴奋」都好，但不是一回事）\n\n"
-    "⚠️ 宁可少归几组，也不要归错一组。拿不准就让它自己一组。\n"
-    "⚠️ 代表词必须从这一组的词里**原样挑一个**，不要自己造新词。\n\n"
-    "只输出纯 JSON：{\"组代表词\": [\"同组的词\", ...], ...}\n"
-    "只出现一次、跟谁都不像的词**不要写进去**。"
+    "把说的是同一种感受的词归组。\n"
+    "· 同一感受的不同写法归一组（满 / 满的 / 被填满了）\n"
+    "· 感受不一样就分开，哪怕都是正面的（满足和骄傲不是一回事）\n"
+    "· 拿不准就别归，宁可少归\n"
+    "每组一行，格式：代表词: 词1, 词2\n"
+    "代表词必须从这组里原样挑一个。只归得成组的才写，其余不要输出。\n"
+    "不要解释，不要标题，只要这些行。"
 )
+
+
+def _parse_lines(raw: str) -> dict:
+    """一行一组：`代表词: 词1, 词2`。看不懂的行直接跳过。"""
+    out = {}
+    for line in (raw or "").splitlines():
+        line = line.strip().lstrip("-·*0123456789. ").strip()
+        if not line or ("：" not in line and ":" not in line):
+            continue
+        head, _, rest = line.replace("：", ":").partition(":")
+        head = head.strip()
+        members = [m.strip() for m in re.split(r"[,，、]", rest) if m.strip()]
+        if head and members:
+            out[head] = members
+    return out
 
 
 def collect(traces_dir) -> collections.Counter:
@@ -115,13 +131,17 @@ async def _once(client, model, words, budget, force_json):
         # 推理模型可能把话全放在 reasoning_content 里，content 是空的。
         # 这一条 08-30 在 backfill_affect.py 上已经踩过一次了。
         raw = getattr(msg, "reasoning_content", "") or ""
-    return _loads(raw)
+    got = _parse_lines(raw)
+    if got:
+        return got
+    return _loads(raw)          # 万一它还是回了 JSON，也认
 
 
 async def _ask(client, model, words):
     """先强制 JSON，不行再放大预算裸跑。跟 backfill_affect.py 同一套。"""
     last = None
-    for budget, force_json in ((3000, True), (8000, False)):
+    # 不再强制 JSON —— 输出已经改成一行一组了。两次预算，够它想完。
+    for budget, force_json in ((4000, False), (12000, False)):
         try:
             return await _once(client, model, words, budget, force_json)
         except Exception as e:
@@ -180,6 +200,7 @@ async def main():
         timeout=120.0,
     )
     model = dehy.get("model", "deepseek-chat")
+    print(f"用的模型：{model}")
 
     known = set(words)
     merged = {}
