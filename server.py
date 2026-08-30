@@ -5232,7 +5232,8 @@ async def breath() -> str:
         dream_section = ""
         try:
             excluded_ids = {b.get("id", "") for b in candidates + selected_feels if b.get("id")}
-            dream_text, _, _, _ = await _refresh_dream_cache(exclude_bucket_ids=excluded_ids)
+            dream_text, _, _, _ = await _refresh_dream_cache(
+                exclude_bucket_ids=excluded_ids, allow_cached=True)
             if dream_text:
                 dream_section = "=== Dream Veil ===\n" + dream_text
         except Exception as e:
@@ -6963,9 +6964,44 @@ async def wander_mark(bucket_id: str, mark: str, note: str = "",
 # 读取最近新增的表层桶（≤10个），返回给 Claude 在提示词引导下自主思考。
 # Claude then decides: resolve some, write feels, or do nothing.
 # =============================================================
-async def _refresh_dream_cache(exclude_bucket_ids: set[str] | None = None):
+# 梦境缓存 TTL（2026-08-30）。
+# breath 以前**每次都重新生成一遍梦** —— 一次 LLM 调用，生成太短还会再跑一次重写，
+# 实测 breath 稳定在 8~10 秒，pulse / undercurrent 只要 0.2 秒，差的就是这个。
+# 而 Dream Veil 只有一百多字的氛围，没有任何理由每次换窗都新鲜。
+# 讽刺的是它一直在写 latest_dream.json（函数名就叫 refresh_cache），
+# **但 breath 从来不读** —— 又是「写了不读」。现在读了。
+DREAM_CACHE_TTL_S = int(os.environ.get("OMBRE_DREAM_TTL_S", "1800") or 1800)   # 默认 30 分钟
+
+
+def _cached_dream_if_fresh() -> str:
+    """缓存里的梦，够新就返回；否则空串。"""
+    try:
+        import json as _jd, time as _td
+        with open(_bucket_path("latest_dream.json"), encoding="utf-8") as _f:
+            data = _jd.load(_f)
+        if not isinstance(data, dict):
+            return ""
+        if _td.time() - float(data.get("ts") or 0) > DREAM_CACHE_TTL_S:
+            return ""
+        return str(data.get("dream") or "")
+    except (OSError, ValueError, TypeError):
+        return ""
+
+
+async def _refresh_dream_cache(exclude_bucket_ids: set[str] | None = None,
+                               allow_cached: bool = False):
     """生成新的梦境文本并写入缓存(latest_dream.json)，dream()和breath()共用同一份生成逻辑。
-    返回(dream_text, parts, recent, all_buckets)；all_buckets为None表示记忆系统不可访问。"""
+    返回(dream_text, parts, recent, all_buckets)；all_buckets为None表示记忆系统不可访问。
+
+    allow_cached=True 时先看缓存（只有 breath 传）。dream() 是他**特地**去做梦，
+    那条路一律重新生成 —— 特地要的东西不该给缓存。
+    ⚠️ 走缓存时 exclude_bucket_ids 是失效的（那份梦生成时不知道这次浮了什么），
+       可能跟 Memory Drift 撞一两条。拿这个换 8 秒，值。
+    """
+    if allow_cached:
+        _c = _cached_dream_if_fresh()
+        if _c:
+            return _c, [], [], None
     try:
         all_buckets = await bucket_mgr.list_all(include_archive=False)
     except Exception as e:
