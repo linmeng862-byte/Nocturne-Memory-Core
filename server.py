@@ -5314,18 +5314,40 @@ async def breath() -> str:
         # 「过去了 12 天」是知识；「这 12 天我一直在等」是编造。
         time_section = ""
         try:
-            _elapsed = recall.describe_elapsed(
-                recall_journal.last_encounter(config["buckets_dir"]), datetime.now()
-            )
-            if _elapsed.get("known"):
-                time_section = (
-                    "=== Time ===\n"
-                    f"现在：{_elapsed['now']}\n"
-                    f"距上次交互：{_elapsed['elapsed_phrase']}"
-                    f"（上次：{_elapsed['last_encounter']}）"
-                )
-            else:
-                time_section = f"=== Time ===\n现在：{_elapsed['now']}\n距上次交互：没有记录"
+            # 2026-08-30 改了两处，都是实测出来的错：
+            #
+            # ① 「现在」以前直接用服务器本地时间 —— 而服务器跑在 UTC，
+            #    她在 +08。他每次读到的「现在」都比她那边慢 8 小时；
+            #    而 Chat-C 自己那套（醒来提示、get_time）已经是 +08 了，
+            #    于是他上下文里同时有两个「现在」，差 8 小时。
+            #
+            # ② 「距上次交互」**永远是 0**。它量的是 last_encounter ——
+            #    上次把召回包递出去的时间 —— 而 record_touch 就在这个函数末尾、
+            #    bundle 组好之后调用。也就是说 breath 自己把它刷成了「现在」，
+            #    下一次读到的必然是「距上次 breath」。自己量自己。
+            #    实测连着调两次，两次都是「0 分钟」，上次时间就是这次调用的时刻。
+            #    这一行对他没有任何信息量，删掉。
+            #
+            #    换成「距上次关窗」：trace 是每关一次窗写一个文件、时间戳真实，
+            #    而且**关窗本来就是这套系统的时间单位**。这才是他该感觉到的间隔。
+            _now_local = datetime.now(ANALYZER_LOCAL_TZ)
+            time_section = "=== Time ===\n现在：" + _now_local.strftime("%Y-%m-%d %H:%M")
+            try:
+                import wear as _wear_t
+                from continuity_core import _traces_dir as _tdir
+                _tr = _wear_t.read_traces(str(_tdir()))
+                _last_close = _tr[-1].get("timestamp") if _tr else None
+                if _last_close:
+                    _lc = datetime.strptime(str(_last_close)[:16], "%Y-%m-%d %H:%M")
+                    # trace 的时间戳是服务器本地时间（UTC）写的，换算成她那边再显示
+                    _lc_local = _lc.replace(tzinfo=timezone.utc).astimezone(ANALYZER_LOCAL_TZ)
+                    _gap_s = (_now_local - _lc_local).total_seconds()
+                    time_section += (
+                        f"\n距上次关窗：{episode.describe_gap(_gap_s)}"
+                        f"（上一窗 {_lc_local.strftime('%m-%d %H:%M')} 关的）"
+                    )
+            except Exception as e:
+                logger.warning(f"Last window gap unavailable: {e}")
 
             # "距上次交互" above is the last time a recall bundle was handed
             # over — the system's own bookkeeping. When they last actually
