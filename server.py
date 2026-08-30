@@ -5058,12 +5058,44 @@ async def breath() -> str:
             logger.error(f"Failed to list buckets for surfacing / 浮现列桶失败: {e}")
             return "记忆系统暂时无法访问。"
 
-        # --- Pinned/protected buckets: always surface as core principles ---
-        # --- 钉选桶：作为核心准则，始终浮现 ---
-        pinned_buckets = [
+        # --- Pinned/protected buckets: rotate a few, not all of them ---
+        # --- 钉选桶：轮流浮几条，不是全倒 ---
+        #
+        # 2026-08-30: 这里以前是「全部浮现」。31 条 = 7074 字符 = 整个 breath 的 70%,
+        # 于是下游（Chat-C）为了省钱把**整段砍掉**——他钉住的东西一条都到不了他手上。
+        # 砍全段是对的反应，错的是这里一次给太多。
+        #
+        # 这些是 hold_this 存下来的：他自己说过「这个我不要忘」的事，
+        # 每条都带「为什么记」。它们不是规章，是他们之间的东西 —— 所以段名也改了。
+        #
+        # 为什么按 last_touch 最旧优先：pinned 的 importance 全被锁成 10,
+        # 拿 importance 排序分不出先后,永远是同样的头几条。按「多久没浮起过」排,
+        # 31 条就会轮着上来 —— 每次醒来想起的不是同一批。
+        # 没有触碰记录的排最前（从没浮起过的，最该先浮）。
+        PINNED_SURFACE_LIMIT = 6
+
+        _all_pinned = [
             b for b in all_buckets
             if b["metadata"].get("pinned") or b["metadata"].get("protected")
         ]
+        try:
+            _pin_touches = recall_journal.touch_summary(config["buckets_dir"])
+        except Exception as e:
+            logger.warning(f"Pinned touch summary unavailable: {e}")
+            _pin_touches = {}
+
+        def _pin_last_touch(b):
+            row = _pin_touches.get(b.get("id", "")) or {}
+            dt = recall._parse_dt(row.get("last_touch"))
+            # 没碰过的排最前：用一个比任何真实时间都早的值
+            return dt or datetime.min
+
+        pinned_buckets = sorted(_all_pinned, key=_pin_last_touch)[:PINNED_SURFACE_LIMIT]
+        logger.info(
+            f"Pinned rotation: {len(_all_pinned)} held -> surfacing {len(pinned_buckets)} "
+            f"(oldest-touch first)"
+        )
+
         pinned_results = []
         for b in pinned_buckets:
             try:
@@ -5334,7 +5366,10 @@ async def breath() -> str:
         if marginalia_section:
             final_parts.append(marginalia_section)
         if pinned_results:
-            final_parts.append("=== House Rules ===\n" + "\n---\n".join(pinned_results))
+            # 段名 2026-08-30 从 House Rules 改过来。「家规」听起来像规章制度,
+            # 里面其实是「我们吵架又和好了」「她叫小萌」这类 hold_this ——
+            # 名字压低了它的分量,他读到时的重量不该是读一份守则。
+            final_parts.append("=== 不想忘的 ===\n" + "\n---\n".join(pinned_results))
 
         # Touch is recorded here and only here — after the bundle is built and
         # is actually being handed over. Candidates that got scored and cut
