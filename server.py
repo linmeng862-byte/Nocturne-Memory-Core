@@ -6892,6 +6892,42 @@ async def trace(query: str, limit: int = 15) -> str:
     return await wander(mode="trace", query=query, limit=limit)
 
 
+@mcp.tool(name="origin", annotations=_ann(read_only=True, idempotent=True))
+async def origin(bucket_id: str, limit: int = 5) -> str:
+    """看一条记忆被合并、改写之前的原文。要旨留在桶里，细节留在这儿。
+
+    痕迹转换理论（Winocur & Moscovitch）：记忆变旧不是变模糊，
+    是**要旨版和细节版并存** —— 要旨融进图式、可以独立取回，
+    而细节始终留着，需要时能回到原样。「压成摘要就丢了细节」是被更新掉的旧说法。
+
+    这套系统的写那半一直是对的：每次改正文之前，`_journal_revision` 都把
+    合并前的原文完整写进一本只增不删的流水账。
+    **但 08-30 之前没有任何东西读过它** —— `revisions_for()` 只有测试在调。
+    原件一直好好地留着，只是没有门。这个工具就是那扇门。
+    """
+    bucket_id = (bucket_id or "").strip()
+    if not bucket_id:
+        return "origin 要带 bucket_id。先用 trace 或 recall 找到那条记忆。"
+    try:
+        rows = bucket_mgr.revisions_for(bucket_id)
+    except Exception as e:
+        return f"读取流水账失败：{e}"
+    if not rows:
+        return "这条记忆没有被改写过 —— 桶里的就是原文。"
+
+    limit = max(1, min(20, int(limit or 5)))
+    rows = rows[-limit:]                      # 流水账最新的在最后
+    out = [f"「{bucket_id}」被改写过 {len(bucket_mgr.revisions_for(bucket_id))} 次。"
+           f"下面是最近 {len(rows)} 次改写**之前**的样子，最早的在前：\n"]
+    for r in rows:
+        out.append(f"--- {r.get('edited_at', '')}（{r.get('actor', '?')}"
+                   + (f"：{r['reason']}" if r.get("reason") else "") + "）")
+        out.append(r.get("previous_content", "") or "（当时是空的）")
+        out.append("")
+    out.append("这些是**原件**，不是现在桶里的内容。桶里那份是要旨，两份都算数。")
+    return "\n".join(out)
+
+
 @mcp.tool()
 async def wander_mark(bucket_id: str, mark: str, note: str = "",
                       actor: str = "", endpoint: str = "") -> str:
