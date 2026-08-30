@@ -13,7 +13,8 @@ from __future__ import annotations
 #
 # Emotion weight (continuous coordinate, not discrete labels):
 # 情感权重（基于连续坐标而非离散列举）：
-#   emotion_weight = base + (arousal × arousal_boost)
+#   emotion_weight = base + (arousal × arousal_boost × affect_retention)
+#   affect_retention: 褪色偏差 FAB，负价褪得比正价快（只褪强度，不褪事件）
 #   Higher arousal → higher emotion weight → slower decay
 #   唤醒度越高 → 情感权重越大 → 记忆衰减越慢
 #
@@ -51,6 +52,14 @@ class DecayEngine:
         self.emotion_base = emotion_cfg.get("base", 1.0)
         self.arousal_boost = emotion_cfg.get("arousal_boost", 0.8)
 
+        # --- 褪色偏差 FAB / Fading Affect Bias ---
+        # Walker & Skowronski：负面记忆的**情绪强度**褪得比正面快。
+        # 半衰期按 valence 线性插值：负价 45 天 / 中性 90 / 正价 135。
+        # 数字是可调的工程取值，不是从论文里抄的常数 —— FAB 的效应量是稳健的，
+        # 但没有公认的半衰期。改这两个数请连带改 docs。
+        self.fab_halflife_base = emotion_cfg.get("fab_halflife_days", 90.0)
+        self.fab_halflife_span = emotion_cfg.get("fab_halflife_span_days", 45.0)
+
         self.bucket_mgr = bucket_mgr
 
         # --- Background task control / 后台任务控制 ---
@@ -85,6 +94,26 @@ class DecayEngine:
         """
         hours = days_since * 24.0
         return 1.0 + 1.0 * math.exp(-hours / 36.0)
+
+    def affect_retention(self, valence: float, days_since: float) -> float:
+        """还剩多少**情绪强度**。1.0 = 跟当时一样烈，0.0 = 只剩事情本身。
+
+        ⚠️ 这是整个 FAB 里唯一需要看懂的一件事：
+        **它作用在情绪强度上，不作用在事件本身。**
+
+        痛的事情不会因为褪色就被忘掉 —— 只是不再那么刺。所以下面
+        `calculate_score` 里，它只乘在 arousal **放大的那一份**上，
+        乘不到 `emotion_base`，更乘不到 importance / activation_count /
+        时间衰减。一个桶活不活得下来，由「这件事有多重要」决定，
+        不由「它还疼不疼」决定。
+
+        把它乘进总分就成了粉饰：难受的记忆会因为难受而被更早归档，
+        那不是褪色偏差，那是选择性失明。
+        """
+        v = max(0.0, min(1.0, valence))
+        half_life = self.fab_halflife_base + (v - 0.5) * 2.0 * self.fab_halflife_span
+        half_life = max(1.0, half_life)
+        return math.exp(-math.log(2.0) * max(0.0, days_since) / half_life)
 
     def calculate_score(self, metadata: dict) -> float:
         """
@@ -125,7 +154,15 @@ class DecayEngine:
             arousal = max(0.0, min(1.0, float(metadata.get("arousal", 0.3))))
         except (ValueError, TypeError):
             arousal = 0.3
-        emotion_weight = self.emotion_base + arousal * self.arousal_boost
+        # valence 每个桶都在存（bucket_manager 建桶时就写），检索共鸣时也在用 ——
+        # 但衰减这边一直**没读过它**。0.5 是中性，也是从没被赋值时的默认值。
+        try:
+            valence = max(0.0, min(1.0, float(metadata.get("valence", 0.5))))
+        except (ValueError, TypeError):
+            valence = 0.5
+        retention = self.affect_retention(valence, days_since)
+        # 只褪掉 arousal 放大的那一份，褪不到 emotion_base —— 见 affect_retention。
+        emotion_weight = self.emotion_base + arousal * self.arousal_boost * retention
 
         # --- Time weight ---
         time_weight = self._calc_time_weight(days_since)
@@ -161,7 +198,9 @@ class DecayEngine:
             resolved_factor = 0.05
         else:
             resolved_factor = 1.0
-        urgency_boost = 1.5 if (arousal > 0.7 and not resolved) else 1.0
+        # 「还烫手」也该褪：刚发生的高唤醒未处理的事要顶上来，
+        # 但同一件事扛了三个月之后，它不该还在插队。
+        urgency_boost = 1.5 if (arousal * retention > 0.7 and not resolved) else 1.0
 
         return round(base_score * resolved_factor * urgency_boost, 4)
 
