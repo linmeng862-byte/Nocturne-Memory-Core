@@ -482,3 +482,41 @@ def test_recall_accepts_a_body_so_the_cue_stays_out_of_the_url():
     assert "request.query_params" in src
     # 而它仍然什么都不记 —— POST 没有把这条门变成写入口
     assert "record_touch" not in src
+
+
+# ---- 久违（neglect）------------------------------------------------------
+
+def test_neglect_never_stops_discriminating():
+    """老写法在 30 天封顶：30 天没碰过的和两年没碰过的拿同一个 1.0。
+    「久违」应该越久越强,不该在某一天之后全部并列。"""
+    from datetime import datetime, timedelta
+    import recall as _r
+    now = datetime(2026, 8, 30, 12, 0)
+    b = {"metadata": {}}
+    a30 = _r.neglect(b, now, now - timedelta(days=30))
+    a90 = _r.neglect(b, now, now - timedelta(days=90))
+    a730 = _r.neglect(b, now, now - timedelta(days=730))
+    assert a30 < a90 < a730, (a30, a90, a730)
+    # 不到 1.0 —— 但只保证到现实尺度为止:float64 在约 750 天之后会真的并到 1.0。
+    assert a730 < 1.0
+
+
+def test_neglect_is_zero_when_just_touched():
+    from datetime import datetime
+    import recall as _r
+    now = datetime(2026, 8, 30, 12, 0)
+    assert _r.neglect({"metadata": {}}, now, now) == 0.0
+
+
+def test_neglect_outweighs_recency():
+    """Bjork：提取强度越低时提取,储存强度增益越大。
+    所以「久违」该比「最近」重 —— 原来 0.8 比 recency 的 1.0 还低,是反的。"""
+    import recall as _r
+    assert _r.W_NEGLECT > _r.W_RECENCY
+
+
+def test_unfinished_still_outranks_neglect():
+    """闸门：翻旧账不许盖过「手上真的没了结的事」。"""
+    import recall as _r
+    assert _r.W_UNFINISHED > _r.W_NEGLECT
+    assert _r.W_QUERY > _r.W_NEGLECT

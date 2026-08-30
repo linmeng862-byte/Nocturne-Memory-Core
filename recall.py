@@ -62,10 +62,17 @@ W_UNFINISHED = 3.0
 W_QUERY = 2.5
 W_SALIENCE = 1.2
 W_RECENCY = 1.0
-W_NEGLECT = 0.8
+# 久违的比最近的重一点点。Bjork & Bjork：提取强度**越低**时提取，
+# 储存强度的增益**越大**（desirable difficulties）——
+# 也就是说,把一条久违的浮上来,比再浮一次刚说过的更有价值。
+# 原来是 0.8（五个信号里最低），跟这条正好反着。
+# ⚠️ 只抬到 1.2，不再高：unfinished(3.0) 和 query(2.5) 必须继续压着它，
+#    否则「翻旧账」会盖过「手上没了结的事」。
+W_NEGLECT = 1.2
 
 RECENCY_HALFLIFE_DAYS = 10.0
-NEGLECT_FULL_DAYS = 30.0
+# 久违程度的时间尺度。**不是**硬上限 —— 见 neglect()。
+NEGLECT_TAU_DAYS = 20.0
 
 
 def _parse_dt(value) -> datetime | None:
@@ -149,7 +156,18 @@ def neglect(bucket: dict, now: datetime, last_touch: datetime | None) -> float:
     if not reference:
         return 0.0
     days = max(0.0, (now - reference).total_seconds() / 86400.0)
-    return min(1.0, days / NEGLECT_FULL_DAYS)
+    # 曲线是 `1 - e^(-days/tau)`，不是 `min(1, days/30)`。
+    #
+    # 老写法在 30 天处**封顶**：一条 30 天没碰过的和一条两年没碰过的,
+    # 拿到的是同一个 1.0,彼此再也分不出先后。而「久违」恰恰应该越久越强。
+    # 08-30 实测线上最老的桶 28 天 —— **再过两天就会开始有一批同时顶到上限**,
+    # 那之后这个信号就废了。趁还没撞上改掉。
+    #
+    # 新写法单调上升,在**任何现实时间尺度上**都还分得出先后
+    # （float64 到约 750 天之后才会真的并到 1.0 —— 那时候有别的问题要操心了）。
+    # 形状跟 wear.py 里的提取强度是同一个 —— 那边算「还剩多少提得起来」,
+    # 这边算「有多久没提起来了」,本来就是一件事的两面。
+    return 1.0 - math.exp(-days / NEGLECT_TAU_DAYS)
 
 
 def query_overlap(bucket: dict, query_terms: set[str]) -> float:
