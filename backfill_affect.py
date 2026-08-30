@@ -28,6 +28,7 @@ import asyncio
 import glob
 import json
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -78,19 +79,46 @@ def _needs_backfill(meta: dict) -> bool:
     return abs(v - DEFAULT_VALENCE) < 1e-9 and abs(a - DEFAULT_AROUSAL) < 1e-9
 
 
+# 08-30 实跑第一次全失败：json.loads 收到空串。
+# max_tokens=64 太小 —— 推理模型先吐一段思考再吐答案，64 个 token 就被截断了，
+# content 回来是空的。放大到 512，并且允许答案埋在散文里。
+_NUM = r"[01](?:\.\d+)?"
+
+
+def _extract(raw: str):
+    """从模型回的东西里挖出两个数。先按 JSON，挖不出再按正则。"""
+    raw = (raw or "").strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    try:
+        data = json.loads(raw)
+        return float(data["valence"]), float(data["arousal"])
+    except (ValueError, TypeError, KeyError):
+        pass
+    # 兜底：模型把 JSON 埋在解释里了。只认带键名的，别乱抓句子里的数字。
+    v = re.search(r'"?valence"?\s*[:：]\s*(' + _NUM + ")", raw)
+    a = re.search(r'"?arousal"?\s*[:：]\s*(' + _NUM + ")", raw)
+    if v and a:
+        return float(v.group(1)), float(a.group(1))
+    raise ValueError("模型没给出可用的两个数，原样回的是：" + (raw[:120] or "（空）"))
+
+
 async def _judge(client, model, text):
     resp = await client.chat.completions.create(
         model=model,
         messages=[{"role": "system", "content": PROMPT},
                   {"role": "user", "content": text[:2000]}],
-        max_tokens=64, temperature=0.1,
+        max_tokens=512, temperature=0.1,
     )
-    raw = (resp.choices[0].message.content or "").strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0]
-    data = json.loads(raw)
-    return (max(0.0, min(1.0, float(data["valence"]))),
-            max(0.0, min(1.0, float(data["arousal"]))))
+    if not resp.choices:
+        raise ValueError("模型没返回任何 choice")
+    msg = resp.choices[0].message
+    raw = msg.content or ""
+    if not raw.strip():
+        # 推理模型可能把话都放在 reasoning_content 里，content 是空的
+        raw = getattr(msg, "reasoning_content", "") or ""
+    v, a = _extract(raw)
+    return (max(0.0, min(1.0, v)), max(0.0, min(1.0, a)))
 
 
 def _revert(journal_path):
