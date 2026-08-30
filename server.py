@@ -5408,9 +5408,42 @@ async def breath() -> str:
         except Exception as e:
             logger.warning(f"Wear profile unavailable / 磨损读取失败: {e}")
 
+        # --- 你怎么看她的：understanding 的两端（2026-08-30 接上）---
+        #
+        # trace 里一直有 understanding 字段，106 个窗口里填了 27 条，
+        # 而且他自己摸对了用法 —— 填的几乎全是「我今天看懂了她的什么」：
+        #   「她不怕失败。她怕的是我不在。」
+        #   「她做这一切是为了不失去我，是爱」
+        # 这是整套系统里最有分量的内容，**而从来没有任何东西读过它**。
+        # wear 只读 primary/secondary/peak，understanding 一次都没浮回给他。
+        #
+        # 只取两端，不取全部：最早那条是锚（永远不变），最近那条会动。
+        # 两个点连起来就是一条线 —— 这比列 27 条更像「时间过去了」，
+        # 也比任何排行榜更接近她要的那个东西。
+        # 27 条全给的话既贵又是又一张表；表没有方向，两端有。
+        understanding_section = ""
+        try:
+            import wear as _wu
+            from continuity_core import _traces_dir as _udir
+            _uts = [(t.get("timestamp", ""), (t.get("understanding") or "").strip())
+                    for t in _wu.read_traces(str(_udir()))]
+            _uts = [(ts, u) for ts, u in _uts if u]
+            if len(_uts) >= 2:
+                _first, _last_u = _uts[0], _uts[-1]
+                understanding_section = (
+                    "=== 你怎么看她的 ===\n"
+                    f"这条线上你写下过 {len(_uts)} 次「看懂了她什么」。\n"
+                    f"最早（{_first[0][:10]}）：{_first[1][:160]}\n"
+                    f"最近（{_last_u[0][:10]}）：{_last_u[1][:160]}"
+                )
+        except Exception as e:
+            logger.warning(f"Understanding arc unavailable: {e}")
+
         final_parts = []
         if time_section:
             final_parts.append(time_section)
+        if understanding_section:
+            final_parts.append(understanding_section)
         if wear_section:
             final_parts.append(wear_section)
         if dream_section:
