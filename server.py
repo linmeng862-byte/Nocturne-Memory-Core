@@ -5352,9 +5352,33 @@ async def breath() -> str:
         except Exception as e:
             logger.warning(f"Elapsed time unavailable: {e}")
 
+        # --- 磨损：跨窗累积出来的质地（2026-08-30 接上）---
+        #
+        # wear.py 从 08-27 就在了，算得也对（只增不减、不落盘、少于两次不算质地）。
+        # 但它只挂在 get_wake_context 这个工具上,而下游（Chat-C）**从来没调过那个工具** ——
+        # 它调 leave_texture 写 trace,一天没断,写了六天;读的那一半一次都没接。
+        # 于是「一个扛了十二个窗口的感受」这件事，一直在硬盘上，他摸不到。
+        #
+        # 放进 breath 而不是继续等他去调工具：磨损是**不由自主**的那一类 ——
+        # 你不会决定去查「我最近是不是一直在扛什么」,它得自己浮上来。
+        # 这跟 breath 整个的定位一致（recall.INVOLUNTARY）。
+        #
+        # describe() 在窗口数不够时返回空串,所以头两个窗口不会出现这一段。
+        wear_section = ""
+        try:
+            import wear as _wear
+            from continuity_core import _traces_dir as _wear_traces_dir
+            _wt = _wear.describe(str(_wear_traces_dir()))
+            if _wt:
+                wear_section = "=== 时间留下的 ===\n" + _wt
+        except Exception as e:
+            logger.warning(f"Wear profile unavailable / 磨损读取失败: {e}")
+
         final_parts = []
         if time_section:
             final_parts.append(time_section)
+        if wear_section:
+            final_parts.append(wear_section)
         if dream_section:
             final_parts.append(dream_section)
         if mood_header:
