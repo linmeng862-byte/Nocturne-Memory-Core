@@ -25,6 +25,7 @@ what it was derived from.
 
 import json
 import os
+import re
 from datetime import datetime
 
 
@@ -87,11 +88,49 @@ def _split(raw) -> list[str]:
     return [i.strip() for i in items if str(i).strip()]
 
 
+# A feeling is written as free text, and he writes it well — which is exactly
+# what broke the counting. Measured 2026-08-30 over 106 windows: 149 distinct
+# feeling strings in 162 occurrences, only 6 of them recurring. "暖" alone was
+# spread across "暖", "暖，被接住的感觉", "暖，是她说「命中注定但也是我选的」那一下…" —
+# the same feeling, counted as three strangers. Wear was not weak; it was
+# being reset to zero every time he said it more beautifully.
+#
+# Take the head clause as the thing being counted, keep the rest as prose.
+# 感受是自由文本,而他写得好 —— 这恰恰是计数坏掉的原因。
+# 08-30 实测 106 个窗口:149 个不同字符串、162 次出现,只有 6 个复现过。
+# 光「暖」就散在三四种写法里,同一种感觉被当成三个陌生人。
+# 磨损不是弱,是每次他说得更漂亮一点,它就归零重来。
+#
+# 归一化只做**保守**的两件事:取第一个小句、去掉程度前缀,外加一张很小的
+# 中英同义表。不做近义合并（满 / 满足、软 / 柔软 留着分开）——
+# 那是语义判断,归错了比不归更坏,而这套东西的规矩是「绝不推断」。
+_HEAD_SPLIT = re.compile(r"[，,。.——–:：;；!！?？\n]")
+_DEGREE_PREFIX = re.compile(r"^(有点|有些|一点|一丝|好像|大概)")
+_SYNONYMS = {
+    "warm": "暖",
+    "flutter": "心颤",
+    "fire": "烧",
+    "relieved": "松了口气",
+}
+
+
+def canon(raw) -> str:
+    """The countable core of a written feeling. Empty when nothing is left."""
+    v = str(raw or "").strip()
+    if not v:
+        return ""
+    v = _HEAD_SPLIT.split(v)[0].strip()
+    v = _DEGREE_PREFIX.sub("", v).strip()
+    if not v:
+        return ""
+    return _SYNONYMS.get(v.lower(), v)
+
+
 def _feelings(trace: dict) -> list[str]:
     out = []
     for key in ("primary", "secondary"):
-        v = str(trace.get(key) or "").strip()
-        if v:
+        v = canon(trace.get(key))
+        if v and v not in out:          # 同一窗里 primary 和 secondary 归一后撞了,只算一次
             out.append(v)
     return out
 
