@@ -107,3 +107,88 @@ def test_tenth_window_of_a_minute_sorts_after_the_second():
     """字符串排会把 -10 排在 -2 前面。"""
     ids = ["2026-08-27-1616-2", "2026-08-27-1616-10"]
     assert sorted(ids, key=wear.order_key) == ["2026-08-27-1616-2", "2026-08-27-1616-10"]
+
+
+# ---- 两个强度（Bjork & Bjork）--------------------------------------------
+
+def _at(day, **kw):
+    """在第 day 天关的一个窗口。"""
+    return dict(window=f"2026-08-{day:02d}-1200",
+                timestamp=f"2026-08-{day:02d} 12:00", **kw)
+
+
+def test_storage_never_falls_but_retrieval_does():
+    """存储强度只增不减,提取强度会掉——这就是把一个数拆成两个的全部理由。"""
+    d = _traces(_at(1, primary="暖"), _at(2, primary="暖"), _at(28, primary="别的"))
+    f = [x for x in wear.profile(d)["recurring_feelings"] if x["item"] == "暖"][0]
+    assert f["storage"] > 0
+    assert f["retrieval"] < 0.2, f      # 26 天没出现,已经浮不上来
+    assert f["windows_carried"] == 2
+
+
+def test_spacing_beats_massing_at_equal_count():
+    """次数一样,间隔开的那个存得更深。
+
+    这是间隔效应,也是本次改动最该被证伪的一条:如果它不成立,
+    那两个强度就只是把一个数写成了两个。
+    """
+    massed = _traces(_at(1, primary="暖"), _at(2, primary="暖"), _at(3, primary="暖"))
+    spaced = _traces(_at(1, primary="暖"), _at(11, primary="暖"), _at(21, primary="暖"))
+    def st(d):
+        return [x for x in wear.profile(d)["recurring_feelings"]
+                if x["item"] == "暖"][0]["storage"]
+    assert st(spaced) > st(massed), (st(spaced), st(massed))
+
+
+def test_deeper_things_are_forgotten_slower():
+    """存储强度减缓遗忘:同样空 20 天,存得深的提取强度剩得多。"""
+    shallow = _traces(_at(1, primary="暖"), _at(2, primary="暖"), _at(25, primary="X"))
+    deep = _traces(_at(1, primary="暖"), _at(5, primary="暖"), )
+    # deep 再加几次有间隔的
+    import json, os
+    for day in (10, 15, 20):
+        w = f"2026-08-{day:02d}-1200"
+        with open(os.path.join(deep, f"trace-{w}.json"), "w", encoding="utf-8") as fh:
+            json.dump({"window": w, "timestamp": f"2026-08-{day:02d} 12:00",
+                       "primary": "暖"}, fh, ensure_ascii=False)
+    w = "2026-08-25-1200"
+    with open(os.path.join(deep, f"trace-{w}.json"), "w", encoding="utf-8") as fh:
+        json.dump({"window": w, "timestamp": "2026-08-25 12:00", "primary": "X"},
+                  fh, ensure_ascii=False)
+    def get(d):
+        return [x for x in wear.profile(d)["recurring_feelings"]
+                if x["item"] == "暖"][0]
+    a, b = get(shallow), get(deep)
+    assert b["storage"] > a["storage"]
+    assert b["retrieval"] > a["retrieval"]
+
+
+def test_everything_decays_to_the_same_instant():
+    """两个词必须衰减到同一个时刻才可比——各停在自己最后一次出现那天的话,
+    久没出现的会显得跟刚说过的一样强。"""
+    d = _traces(_at(1, primary="旧", secondary="新"), _at(2, primary="旧"),
+                _at(20, primary="新"), _at(21, primary="新"))
+    p = {x["item"]: x for x in wear.profile(d)["recurring_feelings"]}
+    assert p["新"]["retrieval"] > p["旧"]["retrieval"]
+    assert p["旧"]["days_since"] > p["新"]["days_since"]
+
+
+def test_describe_names_the_sunk_thing():
+    # 隔开地出现三次(存得深),然后整整一个月不再提(浮不上来)。
+    d = _traces(_at(1, primary="暖"), _at(11, primary="暖"), _at(21, primary="暖"),
+                _at(28, primary="别的"), _at(29, primary="别的"))
+    import json, os
+    for day, w in ((25, "2026-09-25-1200"), (26, "2026-09-26-1200")):
+        with open(os.path.join(d, f"trace-{w}.json"), "w", encoding="utf-8") as fh:
+            json.dump({"window": w, "timestamp": f"2026-09-{day} 12:00",
+                       "primary": "别的"}, fh, ensure_ascii=False)
+    text = wear.describe(d)
+    assert "沉下去、但没有变淡的" in text and "暖" in text, text
+
+
+def test_unparseable_timestamps_still_produce_strengths():
+    """早期脏数据不能让整套强度算不出来。"""
+    d = _traces({"primary": "暖", "timestamp": "坏掉的"},
+                {"primary": "暖", "timestamp": ""})
+    f = wear.profile(d)["recurring_feelings"][0]
+    assert f["storage"] > 0 and 0.0 <= f["retrieval"] <= 1.0

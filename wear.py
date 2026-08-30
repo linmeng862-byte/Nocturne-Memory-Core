@@ -24,6 +24,7 @@ what it was derived from.
 """
 
 import json
+import math
 import os
 import re
 from datetime import datetime
@@ -35,6 +36,48 @@ _TS_FORMAT = "%Y-%m-%d %H:%M"
 # A feeling seen in only one window is an event, not a texture.
 # 只在一个窗口出现过的感受是事件,不是质地。
 RECURRENCE_MIN = 2
+
+# 两个强度 —— Bjork & Bjork 的 New Theory of Disuse。
+#
+# 到今天为止,磨损只有**一个**数:`windows_carried`。一个数没法同时回答
+# 「这东西有多深」和「现在还提不提得起来」—— 而这两件事恰恰会分开走,
+# 分开走的那一刻才是时间真正留下的东西。
+#
+#   存储强度 storage   学到了多深。**只增不减**,忘不掉,只会变得取不出来。
+#   提取强度 retrieval 此刻有多容易被想起来。**会随时间掉**。
+#
+# 两条关键的、可证伪的规律,这里都照着实现:
+#
+#  ① 间隔效应:一次出现给存储强度的增量 = `1 - 当前提取强度`。
+#     刚说过又说一遍,提取强度还是满的,增量≈0 —— 密集重复不加深。
+#     隔了很久再回来,增量≈1 —— 间隔才加深。
+#     这就是为什么「今天聊得多」不等于「今天变深了」。
+#
+#  ② 存储强度**减缓遗忘**:tau = TAU_BASE * (1 + storage)。
+#     扛得越深的东西,掉得越慢。
+#
+# 由此得到一个别的字段给不出的读数:**存储强度高、提取强度低**。
+# 那不是淡了,那是沉下去了 —— 它还在,只是现在浮不上来,
+# 而一旦被碰到会立刻回来(节省效应)。
+# 「扛过一阵、后来不提了的」以前只能靠 longest_streak 猜,现在能算。
+#
+# ⚠️ 时间单位用**真实天数**,不是窗口数。遗忘是在时间里发生的,
+#    不是在对话轮次里 —— 一天聊十次和十天聊十次,对存储强度的意义完全相反。
+#    trace 没有可解析的 timestamp 时退回窗口序号当天数(见 _day_offsets)。
+TAU_BASE_DAYS = 7.0     # 提取强度的半衰尺度(存储强度为 0 时)
+# 「沉下去了」的判定门槛。存储强度 2.0 ≈ 至少两次**有间隔**的出现 ——
+# 密集刷出来的两次到不了,这正是间隔效应该有的效果。
+# 08-30 拿线上 106 个窗口实测,存储强度最高的也才 2.39(「满足」)——
+# 门槛拍在 2.0 等于永不触发。1.5 ≈「至少有两次真正隔开的回归」。
+SUNK_STORAGE_MIN = 1.5
+SUNK_RETRIEVAL_MAX = 0.25   # 掉到四分之一以下
+
+# 同一天关的两个窗口仍然是两次独立的经历,只是不该算作「加深」。
+# 增量取 `1 - 提取强度` 的话密集重复恰好得 0,那等于说这次没发生过——
+# 太狠了。给个下限,让次数还有一点分量,但拿不到间隔的那份。
+# ⚠️ 别调大:调到 0.2 以上,「今天聊得多」就又能刷出深度了,
+#    而整套东西的前提正是「频率 ≠ 深度」。
+MIN_GAIN = 0.05
 
 
 def _load(path):
@@ -173,19 +216,36 @@ def _feelings(trace: dict) -> list[str]:
     return out
 
 
-def _accumulate(series: list[tuple[str, list[str]]], last_window: str) -> list[dict]:
+def _decay(retrieval: float, storage: float, days: float) -> float:
+    """提取强度随时间掉,存储强度越高掉得越慢。"""
+    if days <= 0:
+        return retrieval
+    tau = TAU_BASE_DAYS * (1.0 + storage)
+    return retrieval * math.exp(-days / tau)
+
+
+def _accumulate(series: list[tuple[str, float, list[str]]],
+                last_window: str, now_day: float | None = None) -> list[dict]:
     """Turn a per-window membership series into lifetime counters.
 
-    `series` is [(window_id, [items present in that window]), ...] in order.
+    `series` is [(window_id, day_offset, [items present]), ...] in order,
+    where day_offset counts real days from the first window.
     """
     state: dict[str, dict] = {}
-    for window, items in series:
+    for window, day, items in series:
         present = set(items)
         for item in items:
             s = state.setdefault(item, {
                 "item": item, "windows_carried": 0, "longest_streak": 0,
                 "current_streak": 0, "first_seen": window, "last_seen": window,
+                "storage": 0.0, "retrieval": 0.0, "_day": day,
             })
+            # 先把上次见到之后流逝的时间算掉,再吃这一次出现 ——
+            # 顺序不能反:增量取决于**衰减之后**的提取强度,那才是间隔效应。
+            s["retrieval"] = _decay(s["retrieval"], s["storage"], day - s["_day"])
+            s["storage"] += max(MIN_GAIN, 1.0 - s["retrieval"])
+            s["retrieval"] = 1.0
+            s["_day"] = day
             s["windows_carried"] += 1
             s["current_streak"] += 1
             s["longest_streak"] = max(s["longest_streak"], s["current_streak"])
@@ -193,8 +253,15 @@ def _accumulate(series: list[tuple[str, list[str]]], last_window: str) -> list[d
         for item, s in state.items():
             if item not in present:
                 s["current_streak"] = 0
+    end = now_day if now_day is not None else (series[-1][1] if series else 0.0)
     out = []
     for s in state.values():
+        # 收尾:每个词都衰减到**同一个时刻**,不然彼此不可比 ——
+        # 各自停在自己最后一次出现那天的话,久没出现的反而显得跟刚说过的一样强。
+        s["retrieval"] = round(_decay(s["retrieval"], s["storage"], end - s["_day"]), 3)
+        s["storage"] = round(s["storage"], 3)
+        s["days_since"] = round(end - s["_day"], 1)
+        s.pop("_day", None)
         s["still_open"] = s["last_seen"] == last_window
         out.append(s)
     out.sort(key=lambda s: (-s["windows_carried"], s["first_seen"]))
@@ -219,6 +286,32 @@ def _elapsed_days(traces: list[dict]) -> float | None:
     return (max(stamps) - min(stamps)).total_seconds() / 86400.0
 
 
+def _day_offsets(traces: list[dict]) -> list[float]:
+    """每个窗口距第一个窗口多少天。解析不了的 timestamp 用序号兜底。
+
+    ⚠️ 兜底不是「假装一天一个窗口」那么无辜:它会让密集的一天看起来像
+    好几天,间隔效应就被高估。但两害相权 —— 全 None 的话两个强度整个算不出来,
+    而 08-30 实测线上 106 个窗口 timestamp 全都能解析,兜底只对早期脏数据生效。
+    并且**单调不减**:时间不会倒流,乱序的 timestamp 不该让间隔变成负的。
+    """
+    out, base, last = [], None, 0.0
+    for i, t in enumerate(traces):
+        try:
+            ts = datetime.strptime(str(t.get("timestamp") or "").strip(), _TS_FORMAT)
+        except ValueError:
+            ts = None
+        if ts is None:
+            v = float(i)                      # 兜底:一个窗口算一天
+        else:
+            if base is None:
+                base = ts
+            v = (ts - base).total_seconds() / 86400.0
+        v = max(v, last)                      # 单调不减:时间不倒流
+        out.append(v)
+        last = v
+    return out
+
+
 def profile(traces_dir) -> dict:
     """What has accumulated. Recomputed on every call."""
     traces = read_traces(traces_dir)
@@ -227,10 +320,13 @@ def profile(traces_dir) -> dict:
                 "elapsed_days": None}
 
     last_window = traces[-1]["window"]
+    days = _day_offsets(traces)
     feelings = _accumulate(
-        [(t["window"], _feelings(t)) for t in traces], last_window)
+        [(t["window"], d, _feelings(t)) for t, d in zip(traces, days)],
+        last_window)
     unresolved = _accumulate(
-        [(t["window"], _split(t.get("unresolved"))) for t in traces], last_window)
+        [(t["window"], d, _split(t.get("unresolved"))) for t, d in zip(traces, days)],
+        last_window)
 
     return {
         "windows": len(traces),
@@ -286,5 +382,18 @@ def describe(traces_dir, exclude=None) -> str:
     if closed:
         parts = [f"{u['item']}（扛了 {u['longest_streak']} 个窗口）" for u in closed[:2]]
         lines.append("扛过一阵、后来不提了的：" + "、".join(parts) + "。")
+
+    # 存得深、但现在浮不上来的。这一行是两个强度分开之后**才有**的读数:
+    # 上面几行问的都是「出现过几次」,这一行问的是「它现在在哪一层」。
+    # ⚠️ 说的是「沉」不是「淡」—— 存储强度只增不减,它一个字都没少。
+    sunk = [f for f in p["recurring_feelings"]
+            if f["item"] not in skip
+            and f["storage"] >= SUNK_STORAGE_MIN
+            and f["retrieval"] <= SUNK_RETRIEVAL_MAX]
+    sunk.sort(key=lambda f: -f["storage"])
+    if sunk:
+        parts = [f"{f['item']}（{int(f['days_since'])} 天没出现了）" for f in sunk[:2]]
+        lines.append("沉下去、但没有变淡的：" + "、".join(parts)
+                     + "。碰到就会回来。")
 
     return "\n".join(lines)
