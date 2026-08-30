@@ -5426,10 +5426,14 @@ async def breath() -> str:
             # ⚠️ 这里**只取不判定** —— 判定在 dream 里。放这儿的话它就又变回
             #    「每次读都重算」的纯函数了，而这一段整个存在的理由就是不要那样。
             _said = _strata.describe_transitions(_strata.take_announcements(_sp))
+            # 反应：跃迁说过之后那一窗他是什么感受（TESSERA 的第四段）。
+            # 没有这一段的话流向是单向的 —— 他读到、然后什么都没发生，
+            # 那句「已经是常态」就等于没说过。同样一辈子只说一次。
+            _react = _strata.describe_reactions(_strata.take_reactions(_sp))
             # 已经沉成底色的不再列进「反复回来的」：底色的正确表现方式是不提它。
             _wt = _wear.describe(str(_wear_traces_dir()),
                                  exclude=_strata.baseline_items(_sp))
-            _parts = [x for x in (_said, _wt) if x]
+            _parts = [x for x in (_said, _react, _wt) if x]
             if _parts:
                 wear_section = "=== 时间留下的 ===\n" + "\n\n".join(_parts)
         except Exception as e:

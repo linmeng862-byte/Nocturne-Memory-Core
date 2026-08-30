@@ -124,6 +124,15 @@ def _unique_window_id() -> str:
 
 # ── leave_texture ─────────────────────────────────────
 
+def _feelings_of(trace: dict) -> list:
+    """这一窗的感受,归一化之后。跟 wear 用同一把尺子,不另发明一套。"""
+    try:
+        import wear
+        return wear._feelings(trace)
+    except Exception:
+        return []
+
+
 def _parse_affect(raw: str):
     """把上游传来的 JSON 串变成 dict。坏数据一律当没传。
 
@@ -236,8 +245,12 @@ def leave_texture_impl(state: str, primary_feeling: str,
     # 失败不能影响关窗：质地已经写进 trace 了，地层下次关窗会自己追上。
     try:
         import wear_strata
-        fired = wear_strata.evaluate(str(traces_dir),
-                                     wear_strata.state_path(_get_storage_dir()))
+        _spath = wear_strata.state_path(_get_storage_dir())
+        # 先记反应,再推进地层 —— 顺序要紧。
+        # 反应说的是「知道**上一次**跃迁之后过的这一窗」；先推进的话，
+        # 这一窗新触发的跃迁会被当成它自己的反应对象，等于自问自答。
+        wear_strata.record_reaction(_spath, window_id, _feelings_of(texture_entry))
+        fired = wear_strata.evaluate(str(traces_dir), _spath)
         if fired:
             # ⚠️ 这个模块里没有 logger（08-30 查过），用 print —— 服务是 stdout 收日志的
             print("[strata] promoted: " + "、".join(f["item"] for f in fired), flush=True)

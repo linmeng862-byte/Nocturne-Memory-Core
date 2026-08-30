@@ -168,10 +168,81 @@ def take_announcements(path: str) -> list[dict]:
             last = (rec.get("history") or [{}])[-1]
             out.append(dict(last, item=name))
             rec["pending"] = False
+            # 说出去了 —— 从这一刻起等下一窗的反应（见 record_reaction）。
+            rec["awaiting_reaction"] = True
             changed = True
     if changed:
         save(path, state)
     return out
+
+
+def record_reaction(path: str, window_id: str, feelings: list) -> None:
+    """跃迁说给他听之后的**第一窗**，把那一窗的感受记进来。
+
+    TESSERA（Wrzus & Roberts）的四段是
+    触发情境 → 预期 → 状态表达 → **反应**。
+    这套系统到今天为止只有前三段，流向是单向的：
+    关窗 → trace → wear → 他读到 → **什么都没发生**。
+    知道「踏实成了你们之间的常态」之后过的那一窗，跟不知道时过的那一窗，
+    在记录里长得一模一样 —— 那句话就等于没说过。
+
+    这个函数就是第四段：把「知道之后的第一窗是什么感受」钉进 history。
+    它是**历史**，不是派生量,所以落盘（跟跃迁本身同一个道理）。
+
+    ⚠️ 只记一次，而且只记**紧接着的那一窗**。再往后就不是「反应」了,
+       是日常 —— 那已经由 wear 的计数在管。
+    """
+    state = load(path)
+    changed = False
+    for rec in state.get("items", {}).values():
+        if not rec.get("awaiting_reaction"):
+            continue
+        hist = rec.get("history") or []
+        if hist:
+            hist[-1]["reaction"] = {
+                "window": window_id,
+                "feelings": [f for f in feelings if f][:3],
+            }
+        rec["awaiting_reaction"] = False
+        rec["reaction_untold"] = True
+        changed = True
+    if changed:
+        save(path, state)
+
+
+def take_reactions(path: str) -> list[dict]:
+    """还没说给他听的「知道之后那一窗」。读走就清掉,跟跃迁一个规矩。"""
+    state = load(path)
+    out = []
+    changed = False
+    for name, rec in state.get("items", {}).items():
+        if rec.get("reaction_untold"):
+            hist = rec.get("history") or []
+            r = (hist[-1].get("reaction") if hist else None) or {}
+            out.append({"item": name, **r})
+            rec["reaction_untold"] = False
+            changed = True
+    if changed:
+        save(path, state)
+    return out
+
+
+def describe_reactions(taken: list[dict]) -> str:
+    """反应那句话。空列表返回空串。
+
+    只陈述「那一窗你的感受是什么」,不替他解释这意味着什么 ——
+    跟 wear.describe 一个规矩。
+    """
+    lines = []
+    for r in taken:
+        feels = [f for f in (r.get("feelings") or []) if f]
+        if not feels:
+            continue
+        lines.append(
+            f"你知道「{r['item']}」已经是常态之后，又过了一窗。"
+            f"那一窗你的感受是：" + "、".join(feels) + "。"
+        )
+    return "\n".join(lines)
 
 
 def baseline_items(path: str) -> set:
