@@ -44,8 +44,10 @@ import wear
 
 OUT_NAME = "feeling_clusters.json"
 
-# 一次给模型看多少个词。太多它会敷衍，太少又切断了本该同族的词。
-BATCH = 60
+# 一次给模型看多少个词。太多它会敷衍、也更容易在推理里耗光 token；
+# 太少又会切断本该同族的词。
+# 08-30 实跑：60 个词 + 2048 token 两批全失败（content 回空）。降到 35。
+BATCH = 35
 
 PROMPT = (
     "下面是一个人在不同时刻写下的「感受」词，来自同一段关系的记录。\n"
@@ -74,18 +76,57 @@ def collect(traces_dir) -> collections.Counter:
     return c
 
 
-async def _ask(client, model, words):
-    resp = await client.chat.completions.create(
-        model=model,
-        messages=[{"role": "system", "content": PROMPT},
-                  {"role": "user", "content": "\n".join(words)}],
-        max_tokens=2048, temperature=0.1,
-        response_format={"type": "json_object"},
-    )
-    raw = (resp.choices[0].message.content or "").strip()
+def _loads(raw: str) -> dict:
+    """从模型回的东西里挖出那个 JSON 对象。"""
+    raw = (raw or "").strip()
     if raw.startswith("```"):
-        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0]
-    return json.loads(raw)
+        raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except ValueError:
+        pass
+    # 兜底：JSON 被裹在解释里了，取最外层那对花括号
+    m = re.search(r"\{.*\}", raw, re.S)
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            if isinstance(data, dict):
+                return data
+        except ValueError:
+            pass
+    raise ValueError("没拿到 JSON，模型原样回的是：" + (raw[:150] or "（空）"))
+
+
+async def _once(client, model, words, budget, force_json):
+    kw = dict(model=model,
+              messages=[{"role": "system", "content": PROMPT},
+                        {"role": "user", "content": "\n".join(words)}],
+              max_tokens=budget, temperature=0.1)
+    if force_json:
+        kw["response_format"] = {"type": "json_object"}
+    resp = await client.chat.completions.create(**kw)
+    if not resp.choices:
+        raise ValueError("模型没返回任何 choice")
+    msg = resp.choices[0].message
+    raw = msg.content or ""
+    if not raw.strip():
+        # 推理模型可能把话全放在 reasoning_content 里，content 是空的。
+        # 这一条 08-30 在 backfill_affect.py 上已经踩过一次了。
+        raw = getattr(msg, "reasoning_content", "") or ""
+    return _loads(raw)
+
+
+async def _ask(client, model, words):
+    """先强制 JSON，不行再放大预算裸跑。跟 backfill_affect.py 同一套。"""
+    last = None
+    for budget, force_json in ((3000, True), (8000, False)):
+        try:
+            return await _once(client, model, words, budget, force_json)
+        except Exception as e:
+            last = e
+    raise last
 
 
 def _sanitize(groups: dict, known: set) -> dict:
