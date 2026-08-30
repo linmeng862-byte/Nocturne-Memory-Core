@@ -157,6 +157,22 @@ def leave_texture_impl(state: str, primary_feeling: str,
     traces_dir.mkdir(parents=True, exist_ok=True)
     _save_json(traces_dir / f"trace-{window_id}.json", texture_entry)
 
+    # 地层推进（2026-08-30）。关窗是 wear 计数的时间单位，所以判定挂在这儿 ——
+    # **写的时候推进，不是读的时候**。挂 breath 上它就又变回「每次读都重算」
+    # 的纯函数了，而地层整个存在的理由就是不要那样。
+    # （设计文档写的是挂 dream，但 dream() 现在没有定时触发、
+    #   _refresh_dream_cache 反而是从 breath 里调的 —— 关窗才是真的每窗一次。）
+    # 失败不能影响关窗：质地已经写进 trace 了，地层下次关窗会自己追上。
+    try:
+        import wear_strata
+        fired = wear_strata.evaluate(str(traces_dir),
+                                     wear_strata.state_path(_get_storage_dir()))
+        if fired:
+            # ⚠️ 这个模块里没有 logger（08-30 查过），用 print —— 服务是 stdout 收日志的
+            print("[strata] promoted: " + "、".join(f["item"] for f in fired), flush=True)
+    except Exception as e:
+        print(f"[strata] 推进失败（不影响关窗）: {e}", flush=True)
+
     cont["totalWindows"] = current_window_count
     cont["lastWindowClosed"] = _now()
     cont["lastWindowId"] = window_id

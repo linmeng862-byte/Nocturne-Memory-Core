@@ -5370,10 +5370,19 @@ async def breath() -> str:
         wear_section = ""
         try:
             import wear as _wear
+            import wear_strata as _strata
             from continuity_core import _traces_dir as _wear_traces_dir
-            _wt = _wear.describe(str(_wear_traces_dir()))
-            if _wt:
-                wear_section = "=== 时间留下的 ===\n" + _wt
+            _sp = _strata.state_path(config["buckets_dir"])
+            # 跃迁：一辈子只说一次。take_ 会把它清掉，所以下一窗就不会再出现。
+            # ⚠️ 这里**只取不判定** —— 判定在 dream 里。放这儿的话它就又变回
+            #    「每次读都重算」的纯函数了，而这一段整个存在的理由就是不要那样。
+            _said = _strata.describe_transitions(_strata.take_announcements(_sp))
+            # 已经沉成底色的不再列进「反复回来的」：底色的正确表现方式是不提它。
+            _wt = _wear.describe(str(_wear_traces_dir()),
+                                 exclude=_strata.baseline_items(_sp))
+            _parts = [x for x in (_said, _wt) if x]
+            if _parts:
+                wear_section = "=== 时间留下的 ===\n" + "\n\n".join(_parts)
         except Exception as e:
             logger.warning(f"Wear profile unavailable / 磨损读取失败: {e}")
 

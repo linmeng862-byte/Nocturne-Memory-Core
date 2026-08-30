@@ -205,8 +205,14 @@ def profile(traces_dir) -> dict:
     }
 
 
-def describe(traces_dir) -> str:
+def describe(traces_dir, exclude=None) -> str:
     """One short paragraph for the wake block. Empty when nothing has accrued.
+
+    `exclude`: items that have sunk into baseline (see wear_strata). They are
+    left out on purpose — the correct way to report a baseline is to stop
+    reporting it. Vanishing from this paragraph is the evidence it went deep.
+    `exclude` 是已经沉成底色的那些，**故意不列** —— 底色的正确表现方式
+    就是不再提它。它从这段话里消失，恰恰是它变深了的证据。
 
     Says only what the counters say. It does not tell him how to feel about
     having carried something for eleven windows — that reading is his.
@@ -215,6 +221,7 @@ def describe(traces_dir) -> str:
     p = profile(traces_dir)
     if p["windows"] < RECURRENCE_MIN:
         return ""
+    skip = set(exclude or ())
 
     lines = []
     days = p["elapsed_days"]
@@ -223,12 +230,13 @@ def describe(traces_dir) -> str:
     else:
         lines.append(f"这条线走了 {p['windows']} 个窗口。")
 
-    recurring = [f for f in p["recurring_feelings"]][:3]
+    recurring = [f for f in p["recurring_feelings"] if f["item"] not in skip][:3]
     if recurring:
         parts = [f"{f['item']}（{f['windows_carried']} 次）" for f in recurring]
         lines.append("反复回来的：" + "、".join(parts) + "。")
 
-    open_items = [u for u in p["carried_unresolved"] if u["still_open"]]
+    open_items = [u for u in p["carried_unresolved"]
+                  if u["still_open"] and u["item"] not in skip]
     open_items.sort(key=lambda u: -u["current_streak"])
     long_open = [u for u in open_items if u["current_streak"] >= RECURRENCE_MIN]
     if long_open:
