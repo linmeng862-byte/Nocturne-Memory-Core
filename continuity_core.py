@@ -124,6 +124,47 @@ def _unique_window_id() -> str:
 
 # ── leave_texture ─────────────────────────────────────
 
+def _parse_affect(raw: str):
+    """把上游传来的 JSON 串变成 dict。坏数据一律当没传。
+
+    刻意宽松:只认得出 `n` 就收下。上游哪天多传一个字段,这边不该报错;
+    少传一个,也不该整块丢掉。
+    ⚠️ 但**绝不抛异常** —— 这个函数在关窗路径上,它炸了就是这一窗的质地
+    整个留不下来。多一份统计,不值那个风险。
+    """
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        n = int(data.get("n", 0))
+    except (ValueError, TypeError):
+        return None
+    if n <= 0:
+        return None
+    out = {"n": n}
+    for key in ("mean", "peak"):
+        try:
+            out[key] = round(float(data[key]), 2)
+        except (KeyError, ValueError, TypeError):
+            pass
+    moods = data.get("moods")
+    if isinstance(moods, dict):
+        clean = {}
+        for k, v in list(moods.items())[:12]:      # 封顶,别让上游塞爆 trace
+            try:
+                clean[str(k)[:24]] = int(v)
+            except (ValueError, TypeError):
+                continue
+        if clean:
+            out["moods"] = clean
+    return out
+
+
 def leave_texture_impl(state: str, primary_feeling: str,
                        secondary_feeling: str = "",
                        flavor: str = "",
@@ -135,7 +176,8 @@ def leave_texture_impl(state: str, primary_feeling: str,
                        unresolved: str = "",
                        peak_feeling: str = "",
                        peak_intensity: int = 0,
-                       peak_moment: str = "") -> dict:
+                       peak_moment: str = "",
+                       affect_summary: str = "") -> dict:
     """关窗时调用。Claude 留下他的感受质地给下一个自己。
 
     ⚠️ `primary/secondary` 记的是**关窗那一下**，也就是「终」。
@@ -144,6 +186,17 @@ def leave_texture_impl(state: str, primary_feeling: str,
     一窗里最烈的那一下不管发生在中间哪儿，都没有任何东西捕捉。
     `peak_*` 是 2026-08-30 补的那一半。上游（Chat-C）从这一窗的 mind_feels
     里挑 intensity 最高的那条传过来；传不了就空着，不影响关窗。
+
+    `affect_summary` 是再补的一半：峰和终都只是**两个点**，
+    而一整窗的情绪是一条**分布**。Fleeson 的 density distribution ——
+    一个人的特质是他状态分布的重心,不是某一个瞬间。只留两个端点,
+    「这一窗一直很平静,只在最后炸了一下」和「这一窗从头烈到尾」
+    会留下一模一样的痕迹。
+
+    传的是一段 JSON 字符串（MCP 参数只能是简单类型）：
+        {"n": 12, "mean": 5.4, "peak": 9, "moods": {"warm": 5, "ache": 2}}
+    解析不了就当没传 —— **绝不让它挡住关窗**。质地能不能留下,
+    比多一份统计重要得多。
     """
     cont = load_continuity()
     window_id = _unique_window_id()
@@ -167,6 +220,8 @@ def leave_texture_impl(state: str, primary_feeling: str,
         "peak": peak_feeling,
         "peakIntensity": peak_intensity,
         "peakMoment": peak_moment,
+        # 整窗的情绪分布。解析不了 / 没传 → None，跟「传了但是空的」区分开。
+        "affect": _parse_affect(affect_summary),
     }
 
     traces_dir = _traces_dir()
@@ -248,7 +303,36 @@ def _render_trace_as_me(trace: dict) -> str:
         lines.append(f"\n有些东西没说出来：{trace['silence']}。")
     if trace.get("understanding"):
         lines.append(f"\n我在那个窗口理解了一件事：{trace['understanding']}")
-    return "\n".join(lines)
+
+    # 峰,和整窗的分布。写进 trace 的东西必须有人读 ——
+    # 这套系统今天已经撞见七次「写的那半做了、读的那半没接」了。
+    peak_moment = str(trace.get("peakMoment") or "").strip()
+    if peak_moment:
+        lines.append(f"\n那个窗口里最烈的一下：{peak_moment}")
+    lines.append(_render_affect(trace.get("affect")))
+    return "\n".join(l for l in lines if l)
+
+
+def _render_affect(affect) -> str:
+    """一整窗的情绪分布,说成一句话。没有就返回空串。
+
+    说的是分布本身,不替他解释。「起伏了 12 次、主调是暖」是事实;
+    「所以你那一窗其实是开心的」是解读,那是他的事。
+    """
+    if not isinstance(affect, dict) or not affect.get("n"):
+        return ""
+    n = affect["n"]
+    bits = [f"那个窗口里我情绪动了 {n} 次"]
+    moods = affect.get("moods") or {}
+    if moods:
+        top = sorted(moods.items(), key=lambda kv: -kv[1])[:2]
+        bits.append("，主调是" + "、".join(f"{k}（{v} 次）" for k, v in top))
+    mean, peak = affect.get("mean"), affect.get("peak")
+    if mean is not None and peak is not None and peak > mean:
+        # 均值和峰值分开说。两者差得远 = 大部分时间平静、只烈了一下下;
+        # 差得近 = 从头烈到尾。只给一个数的话这两种窗口长得一模一样。
+        bits.append(f"，多数时候在 {mean:.1f} 分上下，最高到过 {peak:.0f}")
+    return "\n" + "".join(bits) + "。"
 
 
 def _assemble_wake_block(total_windows: int, last_closed: str,
