@@ -42,6 +42,17 @@ from openai import AsyncOpenAI
 DEFAULT_VALENCE = 0.5
 DEFAULT_AROUSAL = 0.3
 
+# 不是记忆桶的目录，绝不碰。
+#
+# 08-30 实跑第一版扫出 198 个，里面混着：
+#   evolution/slang 27、encyclopedia 20、rings 4、personas 1  —— 俚语表、百科、人格
+#   continuity 1                                            —— 连续性状态文件，根本不是桶
+# 给这些标情绪坐标是**把词典当成记忆**：标完它们会跟着进衰减、进共鸣检索，
+# 于是「他对某个词的解释」会以一条有情绪的记忆的身份浮起来。
+#
+# ⚠️ 这就是演练默认按目录列出分布的理由。别去掉那段输出。
+SKIP_DIRS = {"evolution", "continuity"}
+
 PROMPT = (
     "你是一个情感坐标标注器。读下面这段记忆，只输出两个数。\n\n"
     "valence（情感效价）：0.0~1.0，0=极度消极 → 0.5=中性 → 1.0=极度积极\n"
@@ -65,6 +76,13 @@ def _buckets_dir(override):
         return override
     from utils import load_config
     return load_config()["buckets_dir"]
+
+
+def _skipped(base, fp) -> bool:
+    """这个文件在不该碰的目录里吗。只看**相对 base 的第一段**。"""
+    rel = os.path.relpath(fp, base)
+    head = rel.split(os.sep)[0]
+    return head in SKIP_DIRS
 
 
 def _label(fp, post) -> str:
@@ -151,13 +169,18 @@ async def main():
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--dir", default="")
     ap.add_argument("--revert", default="", help="按日志回退")
+    ap.add_argument("--all-dirs", action="store_true",
+                    help="连 evolution/continuity 也扫（默认跳过，它们不是记忆桶）")
     args = ap.parse_args()
 
     if args.revert:
         return _revert(args.revert)
 
     base = _buckets_dir(args.dir)
+    if args.all_dirs:
+        SKIP_DIRS.clear()
     files = sorted(glob.glob(os.path.join(base, "**", "*.md"), recursive=True))
+    files = [f for f in files if not _skipped(base, f)]
     todo, skipped_empty = [], 0
     for fp in files:
         try:
