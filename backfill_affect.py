@@ -155,13 +155,15 @@ def _extract(raw: str):
     raise ValueError("模型没给出可用的两个数，原样回的是：" + (raw[:120] or "（空）"))
 
 
-async def _judge(client, model, text):
-    resp = await client.chat.completions.create(
-        model=model,
-        messages=[{"role": "system", "content": PROMPT},
-                  {"role": "user", "content": text[:2000]}],
-        max_tokens=512, temperature=0.1,
-    )
+async def _once(client, model, text, budget, force_json):
+    kw = dict(model=model,
+              messages=[{"role": "system", "content": PROMPT},
+                        {"role": "user", "content": text[:2000]}],
+              max_tokens=budget, temperature=0.1)
+    if force_json:
+        # 服务端强制只吐 JSON —— 比任何提示词都管用，因为它根本没机会绕。
+        kw["response_format"] = {"type": "json_object"}
+    resp = await client.chat.completions.create(**kw)
     if not resp.choices:
         raise ValueError("模型没返回任何 choice")
     msg = resp.choices[0].message
@@ -169,8 +171,26 @@ async def _judge(client, model, text):
     if not raw.strip():
         # 推理模型可能把话都放在 reasoning_content 里，content 是空的
         raw = getattr(msg, "reasoning_content", "") or ""
-    v, a = _extract(raw)
-    return (max(0.0, min(1.0, v)), max(0.0, min(1.0, a)))
+    return _extract(raw)
+
+
+async def _judge(client, model, text):
+    """先强制 JSON，不行再放大预算裸跑。
+
+    08-30 实跑 108 条失败 6 条，全是同一个样子：模型在推理里反复纠结
+    （「效价应该偏正面？但注意指示…」），512 个 token 用完了还没吐出 JSON。
+    加预算只是治标 —— 真正管用的是 response_format 让它没机会绕。
+    但不是所有服务端都支持这个参数，所以第二次退回裸跑、把预算开大。
+    """
+    attempts = ((768, True), (2048, False))
+    last = None
+    for budget, force_json in attempts:
+        try:
+            v, a = await _once(client, model, text, budget, force_json)
+            return (max(0.0, min(1.0, v)), max(0.0, min(1.0, a)))
+        except Exception as e:
+            last = e
+    raise last
 
 
 def _revert(journal_path):
