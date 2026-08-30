@@ -70,6 +70,7 @@ import os as _os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from bucket_manager import (BucketManager, BucketRevision, HistoryProtected,
                             StaleWrite)
@@ -968,6 +969,23 @@ async def _execute_intent(intent: dict) -> None:
 # --- Create MCP server instance# --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
 # stdio mode ignores host (no network)
+# MCP 工具注解（2026-08-30）。
+# claude.ai 这类客户端**只对 readOnlyHint=True 的工具开放「总是允许」**，
+# 没有注解时 28 个工具全都要逐次点同意 —— 她在手机上用的时候每句话点好几次。
+#
+# ⚠️ 只给**确证过不改记忆正文/元数据**的工具标只读。标错 = 给一个会写入的工具
+#    开了免批准，那比多点几次严重得多。拿不准就不标 —— 不标是安全的默认。
+#    breath / recall 命中后只更新触碰账本和激活计数，不改正文与元数据，按只读对待。
+def _ann(*, read_only: bool = False, destructive: bool = False,
+         idempotent: bool = False) -> ToolAnnotations:
+    return ToolAnnotations(
+        readOnlyHint=read_only,
+        destructiveHint=destructive,
+        idempotentHint=idempotent,
+        openWorldHint=False,
+    )
+
+
 mcp = FastMCP(
     "Ombre Brain",
     host="0.0.0.0",
@@ -3337,7 +3355,7 @@ def _format_trail(trail: dict) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool(name="trail_delta")
+@mcp.tool(name="trail_delta", annotations=_ann(read_only=True, idempotent=True))
 async def trail_delta(
     action: Literal["claim", "clear"],
     query: str,
@@ -5017,7 +5035,7 @@ def _breath_feel_candidates(buckets: list[dict]) -> list[dict]:
     ]
 
 
-@mcp.tool(name="breath")
+@mcp.tool(name="breath", annotations=_ann(read_only=True, idempotent=True))
 async def breath() -> str:
     """新窗或者Compact后读取Nocturne记忆。"""
     await decay_engine.ensure_started()
@@ -5502,7 +5520,7 @@ async def breath() -> str:
 # mode 不同，是因为特地回去找它，跟它自己浮上来，不是同一件事，
 # 不该留下同样的痕。
 # =============================================================
-@mcp.tool(name="recall")
+@mcp.tool(name="recall", annotations=_ann(read_only=True, idempotent=True))
 async def recall_tool(query: str = "", limit: int = 7) -> str:
     """回想。query 留空就是「让该浮的浮上来」，给了就是「关于这个我记得什么」。
 
@@ -5540,7 +5558,7 @@ async def recall_tool(query: str = "", limit: int = 7) -> str:
         logger.warning(f"Recall touch not recorded / 触碰记账失败: {e}")
     return recall.format_bundle(bundle)
 
-@mcp.tool(name="undercurrent")
+@mcp.tool(name="undercurrent", annotations=_ann(read_only=True, idempotent=True))
 def undercurrent_tool() -> dict:
     """weather当前状态与详细展开层。"""
     _desire.tick(idle_seconds=0)
@@ -6404,7 +6422,7 @@ async def grow(content: str) -> str:
 # Also handles deletion (delete=True)
 # 同时承接删除功能
 # =============================================================
-@mcp.tool(name="revise")
+@mcp.tool(name="revise", annotations=_ann(destructive=True))
 async def revise(
     bucket_id: str,
     name: str = "",
@@ -6847,7 +6865,7 @@ async def wander(mode: str, query: str = "", limit: int = 12) -> str:
     )
 
 
-@mcp.tool(name="trace")
+@mcp.tool(name="trace", annotations=_ann(read_only=True, idempotent=True))
 async def trace(query: str, limit: int = 15) -> str:
     """按关键词搜索记忆。"""
     # Kept as its own tool, not folded into wander(mode="trace"), because
@@ -7241,7 +7259,7 @@ async def whisper(content: str = "") -> str:
     return f"💌 小纸条已留下：{content.strip()}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann(read_only=True, idempotent=True))
 async def persona() -> str:
     """查看你对我的认知卡——你对我了解多少。特质、偏好、表达方式、情感模式。"""
     try:
@@ -7269,7 +7287,7 @@ async def persona() -> str:
         return f"读取认知卡失败: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann(read_only=True, idempotent=True))
 async def slang() -> str:
     """查看你们之间的梗词典/暗语——那些只有你们俩才懂的表达。"""
     try:
@@ -7292,7 +7310,7 @@ async def slang() -> str:
         return f"读取梗词典失败: {e}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ann(read_only=True, idempotent=True))
 async def encyclopedia(term: str = "") -> str:
     """查看你们的关系百科——讨论过的重要概念。不传term=列出所有,传term=查看演变过程。"""
     try:
@@ -7364,7 +7382,7 @@ async def cocreate(title: str = "", kind: str = "共书", content: str = "") -> 
 # Continuity Engine 工具
 # =============================================================
 
-@mcp.tool()
+@mcp.tool(annotations=_ann(read_only=True, idempotent=True))
 async def get_wake_context() -> str:
     """新窗口启动时调用。获取接力棒叙事注入块。"""
     result = get_wake_context_impl()
