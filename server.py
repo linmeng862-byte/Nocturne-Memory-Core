@@ -60,7 +60,7 @@ except ImportError:
     fcntl = None  # Windows — file locking not available
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 import httpx
 import os as _os
 
@@ -5939,6 +5939,11 @@ SIGNAL_HINT_KEYS = {
 }
 SIGNAL_LEVEL_WORDS = ("low", "mid", "high")
 SIGNAL_LEVEL_VALUES = {"low": 0.35, "mid": 0.62, "high": 0.86}
+# 08-30 的四档：给的是**动作**（从四个里挑一个），不是无锚点的 0-1 打分 ——
+# 前端把这四个词映射成数字再发（backend.js 的 SIGNAL_LEVELS），但直连 core 的
+# 客户端（CLI）会把词原样送过来，所以这层也得认，否则「明显」会 float() 失败变 0。
+# 数值跟前端对齐，改一边记得改另一边。
+SIGNAL_TIER_VALUES = {"无": 0.0, "有一点": 0.3, "明显": 0.6, "很强": 0.9}
 
 
 def _parse_signal_hints(signal: str) -> dict:
@@ -5971,6 +5976,8 @@ def _normalize_signal_value(value, default: float = 0.0) -> float:
         return 0.0
     if text in SIGNAL_LEVEL_VALUES:
         return SIGNAL_LEVEL_VALUES[text]
+    if text in SIGNAL_TIER_VALUES:
+        return SIGNAL_TIER_VALUES[text]
     try:
         number = float(text)
     except (TypeError, ValueError):
@@ -6181,11 +6188,11 @@ async def hold(
     chord: Optional[ChordName] = None,
     drive: Optional[DriveKeyName] = None,
     drives: Optional[list[DriveKeyName]] = None,
-    discernment: str = "",
-    territorial: str = "",
-    clutch: str = "",
-    strain: str = "",
-    charge: str = "",
+    discernment: Union[str, float] = "",
+    territorial: Union[str, float] = "",
+    clutch: Union[str, float] = "",
+    strain: Union[str, float] = "",
+    charge: Union[str, float] = "",
     pinned: bool = False,
 ) -> str:
     """写入长期沉淀。
@@ -6193,7 +6200,8 @@ async def hold(
     drive：主驱动，九维枚举之一（attachment/libido/possessiveness/reflection/stewardship/curiosity/social/fatigue/stress）；强度默认 mid，勿填 signal 名。
     drives：副驱动列表，同九维枚举；不要重复 drive，后端会去重。
     chord：已知和弦枚举（C6/Am7/Gsus4/Dmaj7/Amaj7/Fmaj7/Fmaj7#11/Gmaj7/Dm7/Em7/F#dim/Bm7b5），不是 Drift/氛围词。
-    Signal 0-1：discernment皱眉辨认，territorial边界占位，clutch靠近抓力，strain绷紧压力，charge想动亮起。
+    Signal 五维：discernment皱眉辨认，territorial边界占位，clutch靠近抓力，strain绷紧压力，charge想动亮起。
+    每维答四档之一：无 / 有一点 / 明显 / 很强（答得出来就答，拿不准就别填那一维，别编）。也收 0-1 数字（老写法）。
     pinned：刻意留下、永不衰减。importance 锁 10，不参与合并。慎用。
     """
     await decay_engine.ensure_started()
