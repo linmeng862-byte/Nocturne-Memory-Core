@@ -100,10 +100,16 @@ def _stratum_for(item: dict, windows_since_first: int, now: datetime) -> str:
 
 
 def evaluate(traces_dir, path: str, now: datetime | None = None) -> list[dict]:
-    """Advance the strata. Returns the transitions that just happened.
+    """Advance the strata. Returns the promotions that just happened.
 
-    Only ever moves forward in this stage: event → texture → baseline.
-    降级（沉降）是第二期，见文档；这里先不做，免得半成品把东西错误地推下去。
+    升：event → texture → baseline，高水位、一次性。返回的 `fired` 只含晋升到
+    baseline 的（值得打断他说一句的那些）。
+
+    降（沉降，第二期）：停止出现够久的 texture / baseline 往下掉一层，带着它
+    活过的区间。固着度越高、需要沉默越久才掉 —— 阻力递增，不是突然锁死
+    （Roberts & DelVecchio）。沉降**不进 fired**：掉下去不打断他，也不是晋升。
+    底色一旦掉回 texture，就自动从 baseline_items 里消失 = 它又会在「反复回来的」
+    里正常露面（= 摘下来了）。见 docs/WEAR-STRATA.md「分期做 · 2」。
     """
     now = now or datetime.now()
     profile = wear.profile(traces_dir)
@@ -148,6 +154,52 @@ def evaluate(traces_dir, path: str, now: datetime | None = None) -> list[dict]:
         if want == BASELINE:
             rec["pending"] = True
             fired.append(dict(entry, item=name))
+
+    # --- 沉降（第二期）：停止出现够久的 texture / baseline 往下掉一层 ---
+    #
+    # 「沉默」按**窗口**算，不按天：last_seen 之后又关过几个窗口。
+    # entrenchment = min(1, windows_carried / 20)
+    # 需要沉默的窗口数 = 3 + round(entrenchment * 12)   →  最少 3，最多 15。
+    # 扛得越久（carried 越大）的东西，需要沉默越久才掉下去 —— 阻力递增。
+    #
+    # 要求**连续**沉默：中途只要出现过一次，wear 的 last_seen 就更新、沉默清零，
+    # 这一步自然回到 0 —— 这就是 hysteresis：单次缺席推不动它，得一直不回来。
+    # 一次 evaluate 最多掉一层（DOWN 只映射一级），跟升级的一次性对称。
+    prof_by_name = {it.get("item"): it for it in
+                    (profile.get("recurring_feelings", [])
+                     + profile.get("carried_unresolved", []))
+                    if it.get("item")}
+    DOWN = {BASELINE: TEXTURE, TEXTURE: EVENT}
+    _just_promoted = {f["item"] for f in fired}
+    for name, rec in items.items():
+        if name in _just_promoted:
+            continue                      # 这一窗刚升上去的，不在同一轮又判它沉降
+        cur = rec.get("stratum", EVENT)
+        if cur not in DOWN:
+            continue                      # event 不再往下沉，它本来就不进 breath
+        it = prof_by_name.get(name)
+        if not it:
+            continue
+        last = it.get("last_seen")
+        silence = (len(order) - 1 - pos[last]) if last in pos else 0
+        carried = it.get("windows_carried", 0)
+        entrenchment = min(1.0, carried / 20)
+        needed = 3 + round(entrenchment * 12)
+        if silence < needed:
+            continue
+        down = DOWN[cur]
+        rec["stratum"] = down
+        rec["history"].append({          # 降级也进 history；升级过的记录永远保留
+            "to": down,
+            "from": cur,
+            "at": now.strftime("%Y-%m-%d"),
+            "windows": carried,
+            "silence": silence,
+            "lived": [rec.get("first_seen"), last],   # 活过的区间
+        })
+        # 掉下去不打断他，也不再等它的「知道之后那一窗」——沉默即深度的反面也是沉默。
+        rec["pending"] = False
+        rec["awaiting_reaction"] = False
 
     state["last_eval"] = now.strftime("%Y-%m-%d %H:%M")
     save(path, state)
