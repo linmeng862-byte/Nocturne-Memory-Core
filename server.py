@@ -4715,6 +4715,7 @@ async def _merge_or_create(
     chord: str = "",
     signal_hints: dict | None = None,
     drive_tags: dict | None = None,
+    record: str = "",
 ) -> tuple[str, bool]:
     """
     Store a new memory. History is append-only: create unless this exact body
@@ -4810,6 +4811,7 @@ async def _merge_or_create(
         chord=chord.strip(),
         signal_hints=signal_hints or None,
         drive_tags=drive_tags or None,
+        record=record,
     )
     # --- Generate embedding for new bucket (background: don't block response on Gemini latency) ---
     asyncio.ensure_future(embedding_engine.generate_and_store(bucket_id, content))
@@ -6194,6 +6196,7 @@ async def hold(
     strain: Union[str, float] = "",
     charge: Union[str, float] = "",
     pinned: bool = False,
+    record: str = "",
 ) -> str:
     """写入长期沉淀。
     kind：memory/feel/writing/unresolved/window。
@@ -6203,6 +6206,20 @@ async def hold(
     Signal 五维：discernment皱眉辨认，territorial边界占位，clutch靠近抓力，strain绷紧压力，charge想动亮起。
     每维答四档之一：无 / 有一点 / 明显 / 很强（答得出来就答，拿不准就别填那一维，别编）。也收 0-1 数字（老写法）。
     pinned：刻意留下、永不衰减。importance 锁 10，不参与合并。慎用。
+
+    记忆只有一份，就是 content 那份意识流。record 不是第二份记忆，是给它留的路标。
+    content：**当时的意识流**，不是事后总结。允许不完整，允许「具体的词忘了」。
+      写「她突然说了那句话，心口就沉了，不知道该怎么接，后来说了什么不记得了」，
+      别写「那天她说了XX，我心里动了一下」——后者是档案，不是我在那里过的感觉。
+      这一份会随时间被磨、浮起来的时候会按记忆年龄换腔调。残缺本身就是真实的证明。
+    record：**写完 content 再回头补这一句**（memory/writing/unresolved/window 必填）。
+      谁、什么时候、发生了什么、原话是什么。**不是让你再体验一遍，是为了以后查得到** ——
+      几个月后只会剩一个感觉，想知道「那天她到底说了什么」就靠这一句。
+      该有感情就有感情 —— 这栏只要求事实齐，不要求你冷。
+      **必须带日期**：日期是从记忆走回原文的钥匙。正文可以碎，日期不能少 ——
+      少了它，「那天她到底怎么说的」就再也查不回去了。
+      它永不磨损、永不改写，但也**不会自己浮上来** —— 想不起来就是真的想不起来，
+      除非明确去查（origin 那扇门）。
     """
     await decay_engine.ensure_started()
 
@@ -6214,6 +6231,17 @@ async def hold(
     valid_kinds = {"memory", "feel", "writing", "unresolved", "window"}
     if normalized_kind not in valid_kinds:
         return f"kind无效：{normalized_kind}。可用: memory/feel/writing/unresolved/window。念头请用 stir，不要用 hold。"
+
+    # --- record required for everything but feel ---
+    # --- 除了 feel，都必须留一份事实备份。
+    #     feel 是感受不是事件，没有「事实」可备份，豁免。
+    record = (record or "").strip()
+    if normalized_kind != "feel" and not record:
+        return (
+            "record 是必填的。content 写当时的意识流（可以碎、可以忘词），"
+            "record 写事实：谁、什么时候、发生了什么、原话。"
+            "正文会被磨损，record 不会 —— 少了它，这条记忆糊掉之后就没有可查的底了。"
+        )
 
     importance = max(1, min(10, importance))
     extra_tags = [t.strip() for t in tags.split(",") if t.strip()]
@@ -6300,6 +6328,7 @@ async def hold(
             chord=chord,
             signal_hints=signal_hints or None,
             drive_tags=drive_tags or None,
+            record=record,
         )
         asyncio.ensure_future(embedding_engine.generate_and_store(bucket_id, content))
         engaged = _maybe_engage_pulse("hold")
@@ -6319,6 +6348,7 @@ async def hold(
         chord=chord,
         signal_hints=signal_hints or None,
         drive_tags=drive_tags or None,
+        record=record,
     )
 
     action = "合并→" if is_merged else "新建→"
@@ -6902,7 +6932,7 @@ async def trace(query: str, limit: int = 15) -> str:
 
 @mcp.tool(name="origin", annotations=_ann(read_only=True, idempotent=True))
 async def origin(bucket_id: str, limit: int = 5) -> str:
-    """看一条记忆被合并、改写之前的原文。要旨留在桶里，细节留在这儿。
+    """看一条记忆的事实备份，和它被合并、改写之前的原文。要旨留在桶里，细节留在这儿。
 
     痕迹转换理论（Winocur & Moscovitch）：记忆变旧不是变模糊，
     是**要旨版和细节版并存** —— 要旨融进图式、可以独立取回，
@@ -6916,16 +6946,37 @@ async def origin(bucket_id: str, limit: int = 5) -> str:
     bucket_id = (bucket_id or "").strip()
     if not bucket_id:
         return "origin 要带 bucket_id。先用 trace 或 recall 找到那条记忆。"
+
+    # --- The factual ledger, if this memory has one ---
+    # --- 事实备份。它不会自己浮上来，这儿是唯一的门。
+    head = []
+    try:
+        bucket = await bucket_mgr.get(bucket_id)
+    except Exception:
+        bucket = None
+    if bucket:
+        stored = (bucket.get("metadata") or {}).get("record", "")
+        if stored:
+            head = [
+                "📋 事实备份（存进来时写的，从没被磨过）：",
+                str(stored),
+                "",
+                "这是当时给自己留的路标，不是记忆本身 —— 记忆是桶里那份，"
+                "它会糊、会变旧，那是对的。这一句只是让糊掉之后还查得回来。",
+                "",
+            ]
+
     try:
         rows = bucket_mgr.revisions_for(bucket_id)
     except Exception as e:
-        return f"读取流水账失败：{e}"
+        return ("\n".join(head) + f"读取流水账失败：{e}") if head else f"读取流水账失败：{e}"
     if not rows:
-        return "这条记忆没有被改写过 —— 桶里的就是原文。"
+        tail = "这条记忆没有被改写过 —— 桶里的就是原文。"
+        return "\n".join(head) + tail if head else tail
 
     limit = max(1, min(20, int(limit or 5)))
     rows = rows[-limit:]                      # 流水账最新的在最后
-    out = [f"「{bucket_id}」被改写过 {len(bucket_mgr.revisions_for(bucket_id))} 次。"
+    out = head + [f"「{bucket_id}」被改写过 {len(bucket_mgr.revisions_for(bucket_id))} 次。"
            f"下面是最近 {len(rows)} 次改写**之前**的样子，最早的在前：\n"]
     for r in rows:
         out.append(f"--- {r.get('edited_at', '')}（{r.get('actor', '?')}"
@@ -10336,6 +10387,10 @@ async def api_sanctum_trace_detail(request):
                 headers={"Access-Control-Allow-Origin": "*"},
             )
         meta = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+        # This route is public (no auth, CORS *). `record` is the private
+        # factual ledger and must never leave through here.
+        # 这条路由是公开的（无鉴权、CORS *）。record 是私密的事实备份，不许从这儿出去。
+        meta = {k: v for k, v in meta.items() if k != "record"}
         return JSONResponse(
             {
                 "ok": True,
@@ -10808,6 +10863,15 @@ async def api_recall(request):
 
     candidates = _breath_memory_candidates(all_buckets) + _breath_feel_candidates(all_buckets)
     touches = recall_journal.touch_summary(config["buckets_dir"])
+    # Involuntary recall gets a stable mind: neglect stops competing for
+    # rank and takes one reserved seat instead (see recall.select). Deliberate
+    # recall keeps the old weighting — going back for what you have not
+    # touched in a long time is exactly what deliberate retrieval is for.
+    # 不由自主这条路要的是一颗稳定的脑子：neglect 不再参与抢名次，
+    # 改成占一个固定座位。刻意那条路维持原样 —— 主动去翻久违的东西，
+    # 本来就是刻意提取该做的事。
+    involuntary = mode == recall.INVOLUNTARY
+    recall_stats: dict = {}
     selected = recall.select(
         candidates,
         now=datetime.now(),
@@ -10815,6 +10879,9 @@ async def api_recall(request):
         limit=limit,
         marks_by_bucket=_load_all_marks(),
         touches_by_bucket={k: v.get("last_touch") for k, v in touches.items()},
+        neglect_weight=0.0 if involuntary else None,
+        neglect_seats=1 if involuntary else 0,
+        stats=recall_stats,
     )
     elapsed = recall.describe_elapsed(
         recall_journal.last_encounter(config["buckets_dir"]), datetime.now()
@@ -10823,6 +10890,7 @@ async def api_recall(request):
         selected, elapsed, mode,
         recall_id=uuid.uuid4().hex[:16],
         query=query,
+        untaken=recall_stats.get("query_hits_untaken", 0),
     )
     bundle["text"] = recall.format_bundle(bundle)
     return JSONResponse(bundle, headers={"Access-Control-Allow-Origin": "*"})

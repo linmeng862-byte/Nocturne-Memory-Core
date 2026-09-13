@@ -143,6 +143,12 @@ class BucketManager:
         self.w_emotion = scoring.get("emotion_resonance", 2.0)
         self.w_time = scoring.get("time_proximity", 1.5)
         self.w_importance = scoring.get("importance", 1.0)
+        # 语义相似度。2026-09-13 之前 embedding 只当预筛用 —— 它把语义最近的
+        # 50 条捞上来，然后精排还是纯字面的 topic_score，于是**语义找到的东西
+        # 被字面否决掉**：搜「害怕被遗忘」返回 null，而库里明明有「她怕我忘了」。
+        # 捞得到、排不上，等于没装。这里把它提成一个跟字面并列的维度。
+        # 权重取 4.0（= w_topic）：两种「像」平起平坐，谁都不许单方面否决对方。
+        self.w_semantic = scoring.get("semantic_similarity", 4.0)
         self.content_weight = scoring.get("content_weight", 1.0)  # body×1, per spec
 
         # --- Optional embedding engine for pre-filtering / 可选 embedding 引擎，用于预筛候选集 ---
@@ -171,6 +177,7 @@ class BucketManager:
         signal: str = "",
         signal_hints: dict = None,
         drive_tags: dict = None,
+        record: str = "",
     ) -> str:
         """
         Create a new memory bucket, return bucket ID.
@@ -217,6 +224,11 @@ class BucketManager:
             metadata["signal_hints"] = signal_hints
         if drive_tags:
             metadata["drive_tags"] = drive_tags
+        # --- record: the factual ledger, exempt from wear ---
+        # --- record：事实备份。正文会碎、会被浮现层换腔调，这一栏不会。
+        #     它不进 recall、不进 breath、不进公开接口，只有明确去查才拿得到。
+        if record and str(record).strip():
+            metadata["record"] = str(record).strip()
         if pinned:
             metadata["pinned"] = True
         if protected:
@@ -694,17 +706,20 @@ class BucketManager:
 
         # --- Layer 1.5: embedding pre-filter (optional, reduces multi-dim ranking set) ---
         # --- 第1.5层：embedding 预筛（可选，缩小精排候选集）---
+        # 2026-09-13：不再拿它当筛子，改成留下**每条的相似度**参与精排。
+        # 筛子的问题是它只能减少候选、不能改变名次，而名次是字面分定的。
+        # 拿到分数之后，语义近但用词不同的那条终于能自己排上来。
+        semantic_by_id: dict = {}
         if self.embedding_engine and self.embedding_engine.enabled:
             try:
                 vector_results = await self.embedding_engine.search_similar(query, top_k=50)
-                if vector_results:
-                    vector_ids = {bid for bid, _ in vector_results}
-                    emb_candidates = [b for b in candidates if b["id"] in vector_ids]
-                    if emb_candidates:  # only replace if there's non-empty overlap
-                        candidates = emb_candidates
-                    # else: keep original candidates as fallback
+                for bid, sim in (vector_results or []):
+                    try:
+                        semantic_by_id[bid] = max(0.0, min(1.0, float(sim)))
+                    except (TypeError, ValueError):
+                        continue
             except Exception as e:
-                logger.warning(f"Embedding pre-filter failed, using fuzzy only / embedding 预筛失败: {e}")
+                logger.warning(f"Embedding scoring failed, using fuzzy only / embedding 打分失败: {e}")
 
         # --- Layer 2: weighted multi-dim ranking ---
         # --- 第二层：多维加权精排 ---
@@ -727,6 +742,13 @@ class BucketManager:
                 # Dim 4: importance (direct normalization)
                 importance_score = max(1, min(10, int(meta.get("importance", 5)))) / 10.0
 
+                # Dim 5: semantic similarity (embedding cosine, 0~1)
+                # 第五维：语义相似度。没有向量的桶（还没生成 embedding、
+                # 或者引擎没开）拿 0 —— 但那样 weight_sum 也不该把它算进去，
+                # 否则一条字面完全命中的老桶会因为「没有向量」被平白稀释掉分数。
+                semantic_score = semantic_by_id.get(bucket.get("id", ""))
+                has_semantic = semantic_score is not None
+
                 # --- Weighted sum / 加权求和 ---
                 total = (
                     topic_score * self.w_topic
@@ -734,8 +756,11 @@ class BucketManager:
                     + time_score * self.w_time
                     + importance_score * self.w_importance
                 )
-                # Normalize to 0~100 for readability
                 weight_sum = self.w_topic + self.w_emotion + self.w_time + self.w_importance
+                if has_semantic:
+                    total += semantic_score * self.w_semantic
+                    weight_sum += self.w_semantic
+                # Normalize to 0~100 for readability
                 normalized = (total / weight_sum) * 100 if weight_sum > 0 else 0
 
                 # Threshold check uses raw (pre-penalty) score so resolved buckets

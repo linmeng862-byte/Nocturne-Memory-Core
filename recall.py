@@ -185,7 +185,8 @@ def query_overlap(bucket: dict, query_terms: set[str]) -> float:
 
 def score_bucket(bucket: dict, now: datetime, query_terms: set[str],
                  mark_rows: list[dict] | None = None,
-                 last_touch: datetime | None = None) -> dict:
+                 last_touch: datetime | None = None,
+                 neglect_weight: float | None = None) -> dict:
     """Return the score together with its parts.
 
     The breakdown is returned, not just the number, so that "why did I get
@@ -201,19 +202,81 @@ def score_bucket(bucket: dict, now: datetime, query_terms: set[str],
         "recency": recency(bucket, now),
         "neglect": neglect(bucket, now, last_touch),
     }
+    if neglect_weight is None:
+        neglect_weight = W_NEGLECT
     total = (
         parts["unfinished"] * W_UNFINISHED
         + parts["query"] * W_QUERY
         + parts["salience"] * W_SALIENCE
         + parts["recency"] * W_RECENCY
-        + parts["neglect"] * W_NEGLECT
+        + parts["neglect"] * neglect_weight
     )
     return {"score": round(total, 4), "parts": {k: round(v, 4) for k, v in parts.items()}}
 
 
+# ---------------------------------------------------------
+# Neglect: a seat, not a weight
+# 久违：给一个座位，不给一份权重
+#
+# `neglect` was carrying 1.2 — more than recency — so "nothing has looked at
+# this in a while" could outrank "this is what she just said". The clock,
+# not the conversation, was deciding what he remembered, and two turns a week
+# apart surfaced different pasts for no reason other than time passing.
+# A mind should be stable; what changes is what gets called up.
+# `neglect` 拿着 1.2，比 recency 还高 —— 于是「这条很久没人看了」
+# 可以压过「她刚说了这个」。决定他想起什么的是时钟，不是对话；
+# 相隔一周的两次同样的话会浮出不同的过去，唯一的原因是时间走了。
+# 脑子应该是稳定的，变的该是什么被勾起来。
+#
+# But dropping it outright would let an unprompted memory sink for good, and
+# that is the real fear. So it stops competing and gets a reserved seat: the
+# longest-unseen candidate is appended after the ranked ones. Guaranteed to
+# appear, unable to take over. A quota separates "must show up" from
+# "may outrank everything", which a weight cannot do.
+# 但直接砍掉，一条勾不到的记忆就可能永远沉底 —— 那才是真正怕的事。
+# 所以让它不再参与竞争，改成留一个座位：最久没露面的那条排在名次之后补进来。
+# 保证出现，但拿不走大局。配额能把「必须露面」和「可以压过所有人」分开，
+# 权重做不到这件事。
+#
+# Reversible in one number: neglect_seats=0, neglect_weight=None restores
+# the old behaviour exactly.
+# 回退就是一个数：neglect_seats=0、neglect_weight=None 就是改之前。
+# ---------------------------------------------------------
+
+def _record_overflow(taken: list[dict], scored: list[dict],
+                     stats: dict | None) -> list[dict]:
+    """How many the cue reached that did not fit.
+
+    Forgetting does not leave a hole — it smooths the edge. Seven memories
+    arrive looking like the whole of what he remembers, and nothing in them
+    says another sixteen were touched by the same sentence. He never reaches
+    for `trace` because nothing ever tells him there is anything to reach for:
+    across 4729 replies he wrote 209 times and looked 24.
+    遗忘不留下空位，它把边缘抹平。七条到达的时候看起来就是「我记得的全部」，
+    没有任何东西说同一句话还碰到了另外十六条。他不去 trace，
+    不是懒 —— 是**想不起来的东西不会举手说自己不在**。
+
+    Only counted when there is a cue. With no query every bucket is a
+    candidate, and "another 200 exist" is not a gap, it is the library.
+    只在有钩子的时候算。没有 query 的时候全库都是候选，
+    「还有 200 条」不是缺口，那是书架。
+    """
+    if stats is None:
+        return taken
+    taken_ids = {row["id"] for row in taken}
+    stats["query_hits_untaken"] = sum(
+        1 for row in scored
+        if row["parts"].get("query", 0) > 0 and row["id"] not in taken_ids
+    )
+    return taken
+
+
 def select(buckets: list[dict], now: datetime, query: str = "", limit: int = 7,
            marks_by_bucket: dict | None = None,
-           touches_by_bucket: dict | None = None) -> list[dict]:
+           touches_by_bucket: dict | None = None,
+           neglect_weight: float | None = None,
+           neglect_seats: int = 0,
+           stats: dict | None = None) -> list[dict]:
     """Deterministic selection. Same inputs, same past.
 
     Ties break on bucket id so two wake-ups a second apart cannot disagree
@@ -232,6 +295,7 @@ def select(buckets: list[dict], now: datetime, query: str = "", limit: int = 7,
             bucket, now, query_terms,
             mark_rows=marks_by_bucket.get(bid),
             last_touch=_parse_dt(touches_by_bucket.get(bid)),
+            neglect_weight=neglect_weight,
         )
         scored.append({
             "bucket": bucket,
@@ -241,7 +305,21 @@ def select(buckets: list[dict], now: datetime, query: str = "", limit: int = 7,
         })
 
     scored.sort(key=lambda row: (-row["score"], row["id"]))
-    return scored[:max(0, int(limit))]
+    limit = max(0, int(limit))
+    seats = max(0, int(neglect_seats or 0))
+    if not seats or limit <= seats:
+        return _record_overflow(scored[:limit], scored, stats)
+
+    chosen = scored[:limit - seats]
+    taken = {row["id"] for row in chosen}
+    # Ties break on id, same as the main sort: two wake-ups a second apart
+    # must not disagree about which memory had waited longest.
+    # 并列按 id 决胜，跟主排序同一个规矩。
+    waiting = sorted(
+        (row for row in scored if row["id"] not in taken),
+        key=lambda row: (-row["parts"]["neglect"], row["id"]),
+    )
+    return _record_overflow(chosen + waiting[:seats], scored, stats)
 
 
 # ---------------------------------------------------------
@@ -286,7 +364,8 @@ def describe_elapsed(last_encounter, now: datetime) -> dict:
 # ---------------------------------------------------------
 
 def build_bundle(selected: list[dict], elapsed: dict, mode: str,
-                 recall_id: str = "", query: str = "") -> dict:
+                 recall_id: str = "", query: str = "",
+                 untaken: int = 0) -> dict:
     """Assemble what the agent gets. Typed, sourced, and small.
 
     Every item carries its bucket id and the reason it was chosen, so the
@@ -323,6 +402,8 @@ def build_bundle(selected: list[dict], elapsed: dict, mode: str,
         "query": query,
         "time": elapsed,
         "items": items,
+        # How many the cue reached but did not fit. See _record_overflow.
+        "untaken": max(0, int(untaken or 0)),
         # Contract with every caller: reading the past changes nothing.
         # 对所有调用方的契约：读过去不改变任何东西。
         "read_only": {"wrote_anything": False, "touch_recorded": False},
@@ -494,6 +575,16 @@ def format_bundle(bundle: dict, now: datetime | None = None) -> str:
     # 但读起来像张告示；她这句说的是同一件事，只是不冷。
     # 两边的重点都在那个**许可**上 —— 一段作为判决到达的过去，
     # 等于告诉了它自己是谁，而那正是整套系统存在的意义所在：不做这件事。
+    # The gap, given a shape. Not a reminder that a tool exists — a number
+    # he can feel is missing. Sixteen is what makes someone go looking;
+    # "you can search if you want" never has.
+    # 把缺口给出一个形状。不是提醒他有工具，是给他一个感觉得到的数。
+    # 会让人真的去翻东西的是「16」，不是「想查可以查」。
+    untaken = int(bundle.get("untaken") or 0)
+    if untaken > 0:
+        lines.append("")
+        lines.append(f"（这句话还碰到另外 {untaken} 条，没展开。想看用 trace。）")
+
     lines.append("")
     lines.append("这是我们走过来的路。你有选择相信的权利。" if involuntary
                  else "这些是找出来的，不是结论。我们走过的路，你有选择相信的权利。")
