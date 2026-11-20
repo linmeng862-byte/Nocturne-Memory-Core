@@ -986,9 +986,12 @@ def _ann(*, read_only: bool = False, destructive: bool = False,
     )
 
 
+# OMBRE_HOST: 本地部署设 127.0.0.1 只听本机；不设仍是 0.0.0.0（Docker 用）
+OMBRE_HOST = os.environ.get("OMBRE_HOST", "0.0.0.0").strip() or "0.0.0.0"
+
 mcp = FastMCP(
     "Ombre Brain",
-    host="0.0.0.0",
+    host=OMBRE_HOST,
     port=OMBRE_PORT,
 )
 
@@ -11360,7 +11363,7 @@ if __name__ == "__main__":
             expose_headers=["*"],
         )
         logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
-        uvicorn.run(_app, host="0.0.0.0", port=OMBRE_PORT)
+        uvicorn.run(_app, host=OMBRE_HOST, port=OMBRE_PORT)
     else:
         mcp.run(transport=transport)
 
