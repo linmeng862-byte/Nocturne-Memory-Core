@@ -7952,6 +7952,32 @@ async def api_diag(request):
     })
 
 
+@mcp.custom_route("/api/export-vault", methods=["GET"])
+async def api_export_vault(request):
+    """Whole buckets_dir as tar.gz — for moving house when the volume can't be downloaded.
+    整个 buckets_dir 打成 tar.gz —— 搬家用,挂载卷下载不了的时候走这里。"""
+    from starlette.responses import FileResponse
+    from starlette.background import BackgroundTask
+    import tarfile, tempfile, pathlib
+    err = _require_auth(request)
+    if err: return err
+    bd = pathlib.Path(config.get("buckets_dir", "./buckets"))
+    fd, tmp = tempfile.mkstemp(suffix=".tar.gz")
+    os.close(fd)
+
+    def _pack():
+        with tarfile.open(tmp, "w:gz") as tar:
+            tar.add(str(bd), arcname="buckets")
+
+    await asyncio.to_thread(_pack)
+    return FileResponse(
+        tmp,
+        media_type="application/gzip",
+        filename="nocturne-buckets.tar.gz",
+        background=BackgroundTask(os.unlink, tmp),
+    )
+
+
 @mcp.custom_route("/api/fix-feel", methods=["POST"])
 async def api_fix_feel(request):
     from starlette.responses import JSONResponse
